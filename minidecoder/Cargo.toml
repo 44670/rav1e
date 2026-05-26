@@ -10,3 +10,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "minidecoder"
 path = "src/main.rs"
+
+[dependencies]
+image = { version = "0.25.0", default-features = false, features = ["png"] }
