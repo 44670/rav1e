@@ -1,5 +1,6 @@
 aom_test
 target/
+tmp/
 *.y4m
 *.ivf
 *.png

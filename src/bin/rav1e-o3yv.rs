@@ -1,9 +1,11 @@
 use minidecoder::{
-  copy_mb_from_reference, decode_stream, prefill_eye, read_raw_mb,
-  write_file_header, write_key_raw_frame, write_p_frame, EncodedFragment,
-  EncodedTile, EyeFrame, Mv, SbsFrame, CHROMA_W, EYE_H, EYE_W, MB_COUNT, MB_W,
-  MODE_BASE_RES, MODE_COPY16, MODE_RAW_MB, SBS_FRAME_BYTES, TAG_DC_ONLY_S16,
-  TAG_DC_ONLY_S8,
+  copy_mb_from_reference, copy_vbs_from_reference, decode_stream, prefill_eye,
+  read_raw_mb, write_file_header, write_key_raw_frame, write_p_frame,
+  EncodedFragment, EncodedTile, EyeFrame, Mv, SbsFrame, VbsShape, CHROMA_H,
+  CHROMA_W, EYE_H, EYE_W, MB_H, MB_W, MODE_BASE_RES, MODE_COPY16,
+  MODE_COPY16X8, MODE_COPY16X8_RES, MODE_COPY16_RES, MODE_COPY8X16,
+  MODE_COPY8X16_RES, MODE_COPY8X8, MODE_COPY8X8_RES, MODE_RAW_MB,
+  SBS_FRAME_BYTES, TAG_DC_ONLY_S16, TAG_DC_ONLY_S8, TAG_RAW_4X4,
 };
 use std::env;
 use std::fs;
@@ -16,14 +18,47 @@ struct Options {
   frames: Option<usize>,
   keyint: usize,
   loopback: bool,
+  row_bands: bool,
+  max_p_frame_bytes: usize,
 }
 
 #[derive(Default)]
 struct FrameStats {
   skip_mb: usize,
   copy16_mb: usize,
+  copy16_res_mb: usize,
+  vbs_mb: usize,
+  vbs_res_mb: usize,
   base_res_mb: usize,
   raw_mb: usize,
+  p_frame_bytes: usize,
+}
+
+impl FrameStats {
+  fn add_choice(&mut self, choice: &MbChoice) {
+    match choice.mode {
+      MODE_BASE_RES => self.base_res_mb += 1,
+      MODE_COPY16 => self.copy16_mb += 1,
+      MODE_COPY16_RES => self.copy16_res_mb += 1,
+      MODE_COPY16X8 | MODE_COPY8X16 | MODE_COPY8X8 => self.vbs_mb += 1,
+      MODE_COPY16X8_RES | MODE_COPY8X16_RES | MODE_COPY8X8_RES => {
+        self.vbs_res_mb += 1
+      }
+      MODE_RAW_MB => self.raw_mb += 1,
+      _ => {}
+    }
+  }
+}
+
+#[derive(Clone)]
+struct MbChoice {
+  mode: u8,
+  mvs: Vec<Mv>,
+  residual: Vec<u8>,
+  raw: Vec<u8>,
+  cost: usize,
+  segment_id: u8,
+  vbs_shape: Option<VbsShape>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -65,19 +100,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       let reference_frame =
         reference.as_ref().ok_or("missing reference frame")?;
       let (left_tile, left_recon, left_stats) =
-        encode_tile(0, &frame.left, &reference_frame.left);
-      let (right_tile, right_recon, right_stats) =
-        encode_tile(1, &frame.right, &reference_frame.right);
+        encode_tile(0, &frame.left, &reference_frame.left, options.row_bands);
+      let (right_tile, right_recon, right_stats) = encode_tile(
+        1,
+        &frame.right,
+        &reference_frame.right,
+        options.row_bands,
+      );
+      let frame_start = stream.len();
       write_p_frame(&mut stream, frame_no as u32, left_tile, right_tile);
+      let p_frame_bytes = stream.len() - frame_start;
       add_stats(&mut total, &left_stats);
       add_stats(&mut total, &right_stats);
+      total.p_frame_bytes += p_frame_bytes;
       eprintln!(
-        "frame {frame_no}: skip={} copy16={} base_res={} raw_mb={}",
+        "frame {frame_no}: bytes={} skip={} copy16={} copy16_res={} vbs={} vbs_res={} base_res={} raw_mb={}",
+        p_frame_bytes,
         left_stats.skip_mb + right_stats.skip_mb,
         left_stats.copy16_mb + right_stats.copy16_mb,
+        left_stats.copy16_res_mb + right_stats.copy16_res_mb,
+        left_stats.vbs_mb + right_stats.vbs_mb,
+        left_stats.vbs_res_mb + right_stats.vbs_res_mb,
         left_stats.base_res_mb + right_stats.base_res_mb,
         left_stats.raw_mb + right_stats.raw_mb
       );
+      if p_frame_bytes > options.max_p_frame_bytes {
+        eprintln!(
+          "warning: frame {frame_no} exceeds configured P-frame budget: {p_frame_bytes} > {}",
+          options.max_p_frame_bytes
+        );
+      }
       SbsFrame { left: left_recon, right: right_recon }
     };
 
@@ -97,11 +149,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
   write_output(&options.output, &stream)?;
   eprintln!(
-    "wrote {} bytes, frames={}, skip={} copy16={} base_res={} raw_mb={}",
+    "wrote {} bytes, frames={}, p_bytes={}, skip={} copy16={} copy16_res={} vbs={} vbs_res={} base_res={} raw_mb={}",
     stream.len(),
     frame_count,
+    total.p_frame_bytes,
     total.skip_mb,
     total.copy16_mb,
+    total.copy16_res_mb,
+    total.vbs_mb,
+    total.vbs_res_mb,
     total.base_res_mb,
     total.raw_mb
   );
@@ -114,6 +170,8 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
   let mut frames = None;
   let mut keyint = 48usize;
   let mut loopback = false;
+  let mut row_bands = true;
+  let mut max_p_frame_bytes = 131_072usize;
 
   let mut args = env::args().skip(1);
   while let Some(arg) = args.next() {
@@ -127,6 +185,11 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
         keyint = args.next().ok_or("--keyint needs a value")?.parse()?
       }
       "--loopback" => loopback = true,
+      "--full-fragment" => row_bands = false,
+      "--max-p-frame-bytes" => {
+        max_p_frame_bytes =
+          args.next().ok_or("--max-p-frame-bytes needs a value")?.parse()?
+      }
       "--help" | "-h" => {
         print_usage();
         std::process::exit(0);
@@ -145,12 +208,14 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
     frames,
     keyint,
     loopback,
+    row_bands,
+    max_p_frame_bytes,
   })
 }
 
 fn print_usage() {
   eprintln!(
-    "usage: rav1e-o3yv --input <800x240-yuv420.yuv|-> --output <out.o3yv|-> [--frames N] [--keyint N] [--loopback]"
+    "usage: rav1e-o3yv --input <800x240-yuv420.yuv|-> --output <out.o3yv|-> [--frames N] [--keyint N] [--loopback] [--full-fragment] [--max-p-frame-bytes N]"
   );
 }
 
@@ -173,60 +238,84 @@ fn write_output(path: &str, bytes: &[u8]) -> io::Result<()> {
 }
 
 fn encode_tile(
-  tile_id: u8, src: &EyeFrame, reference: &EyeFrame,
+  tile_id: u8, src: &EyeFrame, reference: &EyeFrame, row_bands: bool,
 ) -> (EncodedTile, EyeFrame, FrameStats) {
+  let base_mv = find_base_mv(src, reference);
   let mut recon = EyeFrame::new();
-  prefill_eye(&mut recon, reference, Mv::ZERO);
+  prefill_eye(&mut recon, reference, base_mv);
 
-  let mut mode_stream = Vec::new();
-  let mut residual_stream = Vec::new();
-  let mut raw_stream = Vec::new();
   let mut stats = FrameStats::default();
-  let mut skip_run = 0usize;
+  let mut fragments = Vec::new();
+  let bands: &[(usize, usize)] =
+    if row_bands { &[(0, 5), (5, 5), (10, 5)] } else { &[(0, MB_H)] };
 
-  for mb_index in 0..MB_COUNT {
-    if mb_equal(src, &recon, mb_index) {
-      skip_run += 1;
-      stats.skip_mb += 1;
-      if skip_run == 0x7f {
-        mode_stream.push(0x7f);
-        skip_run = 0;
+  for &(row_start, row_count) in bands {
+    let mut mode_stream = Vec::new();
+    let mut residual_stream = Vec::new();
+    let mut raw_stream = Vec::new();
+    let mut segment_ids = Vec::with_capacity(row_count * MB_W);
+    let mut skip_run = 0usize;
+
+    for row in row_start..row_start + row_count {
+      for col in 0..MB_W {
+        let mb_index = row * MB_W + col;
+        if mb_equal(src, &recon, mb_index) {
+          skip_run += 1;
+          segment_ids.push(0);
+          stats.skip_mb += 1;
+          if skip_run == 0x7f {
+            mode_stream.push(0x7f);
+            skip_run = 0;
+          }
+          continue;
+        }
+
+        flush_skip(&mut mode_stream, &mut skip_run);
+        let choice = choose_mb(src, reference, &recon, mb_index);
+        write_choice(
+          &mut mode_stream,
+          &mut residual_stream,
+          &mut raw_stream,
+          &choice,
+        );
+        apply_choice_to_recon(&mut recon, src, reference, mb_index, &choice);
+        segment_ids.push(choice.segment_id);
+        stats.add_choice(&choice);
       }
-      continue;
     }
 
     flush_skip(&mut mode_stream, &mut skip_run);
+    mode_stream.push(0);
 
-    if let Some(mv) = find_exact_copy(src, reference, mb_index) {
-      mode_stream.push(0x80 | MODE_COPY16);
-      mode_stream.push(mv.x as u8);
-      mode_stream.push(mv.y as u8);
-      copy_mb_from_reference(&mut recon, reference, mb_index, mv);
-      stats.copy16_mb += 1;
-    } else if let Some(residual) = build_dc_residual(src, &recon, mb_index) {
-      mode_stream.push(0x80 | MODE_BASE_RES);
-      residual_stream.extend_from_slice(&residual);
-      copy_mb_from_eye(&mut recon, src, mb_index);
-      stats.base_res_mb += 1;
-    } else {
-      mode_stream.push(0x80 | MODE_RAW_MB);
-      read_raw_mb(src, mb_index, &mut raw_stream);
-      copy_mb_from_eye(&mut recon, src, mb_index);
-      stats.raw_mb += 1;
+    let fragment = EncodedFragment {
+      tile_id,
+      row_start: row_start as u8,
+      row_count: row_count as u8,
+      start_mb: (row_start * MB_W) as u16,
+      mb_count: (row_count * MB_W) as u16,
+      segment_map_stream: build_segment_map(&segment_ids),
+      mode_stream,
+      residual_stream,
+      raw_stream,
+    };
+    fragments.push(fragment);
+  }
+
+  let segment_count = if fragments
+    .iter()
+    .any(|f| f.segment_map_stream.chunks_exact(2).any(|entry| entry[1] != 0))
+  {
+    4
+  } else {
+    1
+  };
+  if segment_count == 1 {
+    for fragment in &mut fragments {
+      fragment.segment_map_stream.clear();
     }
   }
 
-  flush_skip(&mut mode_stream, &mut skip_run);
-  mode_stream.push(0);
-
-  let fragment = EncodedFragment::full_eye(
-    tile_id,
-    mode_stream,
-    residual_stream,
-    raw_stream,
-  );
-  let tile =
-    EncodedTile { tile_id, base_mv: Mv::ZERO, fragments: vec![fragment] };
+  let tile = EncodedTile { tile_id, base_mv, segment_count, fragments };
   (tile, recon, stats)
 }
 
@@ -236,6 +325,191 @@ fn flush_skip(mode_stream: &mut Vec<u8>, skip_run: &mut usize) {
     mode_stream.push(run as u8);
     *skip_run -= run;
   }
+}
+
+fn choose_mb(
+  src: &EyeFrame, reference: &EyeFrame, prefilled: &EyeFrame, mb_index: usize,
+) -> MbChoice {
+  let mut candidates = Vec::new();
+  let mut raw = Vec::with_capacity(384);
+  read_raw_mb(src, mb_index, &mut raw);
+  candidates.push(MbChoice {
+    mode: MODE_RAW_MB,
+    mvs: Vec::new(),
+    residual: Vec::new(),
+    cost: 1 + raw.len() + 24,
+    raw,
+    segment_id: 3,
+    vbs_shape: None,
+  });
+
+  if let Some(residual) = build_lossless_residual(src, prefilled, mb_index) {
+    candidates.push(MbChoice {
+      mode: MODE_BASE_RES,
+      mvs: Vec::new(),
+      cost: 1 + residual.len() + residual_decode_cost(&residual),
+      residual,
+      raw: Vec::new(),
+      segment_id: 2,
+      vbs_shape: None,
+    });
+  }
+
+  if let Some(mv) = find_exact_copy(src, reference, mb_index) {
+    candidates.push(MbChoice {
+      mode: MODE_COPY16,
+      mvs: vec![mv],
+      residual: Vec::new(),
+      raw: Vec::new(),
+      cost: 1 + 2 + 2,
+      segment_id: 1,
+      vbs_shape: None,
+    });
+  }
+
+  let mv = find_best_copy_mv(src, reference, mb_index);
+  let mut copy_pred = prefilled.clone();
+  copy_mb_from_reference(&mut copy_pred, reference, mb_index, mv);
+  if let Some(residual) = build_lossless_residual(src, &copy_pred, mb_index) {
+    candidates.push(MbChoice {
+      mode: MODE_COPY16_RES,
+      mvs: vec![mv],
+      cost: 1 + 2 + residual.len() + residual_decode_cost(&residual),
+      residual,
+      raw: Vec::new(),
+      segment_id: 2,
+      vbs_shape: None,
+    });
+  }
+
+  for shape in [VbsShape::Split16x8, VbsShape::Split8x16, VbsShape::Split8x8] {
+    let mvs = find_best_vbs_mvs(src, reference, mb_index, shape);
+    let mut pred = prefilled.clone();
+    copy_vbs_from_reference(&mut pred, reference, mb_index, shape, &mvs);
+    let exact = mb_equal(src, &pred, mb_index);
+    let mv_bytes = mvs.len() * 2;
+    let exact_mode = match shape {
+      VbsShape::Split16x8 => MODE_COPY16X8,
+      VbsShape::Split8x16 => MODE_COPY8X16,
+      VbsShape::Split8x8 => MODE_COPY8X8,
+    };
+    let res_mode = match shape {
+      VbsShape::Split16x8 => MODE_COPY16X8_RES,
+      VbsShape::Split8x16 => MODE_COPY8X16_RES,
+      VbsShape::Split8x8 => MODE_COPY8X8_RES,
+    };
+    if exact {
+      candidates.push(MbChoice {
+        mode: exact_mode,
+        mvs,
+        residual: Vec::new(),
+        raw: Vec::new(),
+        cost: 1 + mv_bytes + 3,
+        segment_id: 1,
+        vbs_shape: Some(shape),
+      });
+    } else if let Some(residual) =
+      build_lossless_residual(src, &pred, mb_index)
+    {
+      candidates.push(MbChoice {
+        mode: res_mode,
+        mvs,
+        cost: 1 + mv_bytes + residual.len() + residual_decode_cost(&residual),
+        residual,
+        raw: Vec::new(),
+        segment_id: 2,
+        vbs_shape: Some(shape),
+      });
+    }
+  }
+
+  candidates
+    .into_iter()
+    .min_by_key(|choice| choice.cost)
+    .expect("RAW_MB candidate always exists")
+}
+
+fn write_choice(
+  mode_stream: &mut Vec<u8>, residual_stream: &mut Vec<u8>,
+  raw_stream: &mut Vec<u8>, choice: &MbChoice,
+) {
+  mode_stream.push(0x80 | choice.mode);
+  for mv in &choice.mvs {
+    mode_stream.push(mv.x as u8);
+    mode_stream.push(mv.y as u8);
+  }
+  residual_stream.extend_from_slice(&choice.residual);
+  raw_stream.extend_from_slice(&choice.raw);
+}
+
+fn apply_choice_to_recon(
+  recon: &mut EyeFrame, src: &EyeFrame, reference: &EyeFrame, mb_index: usize,
+  choice: &MbChoice,
+) {
+  match choice.mode {
+    MODE_COPY16 => {
+      copy_mb_from_reference(recon, reference, mb_index, choice.mvs[0])
+    }
+    MODE_COPY16X8 | MODE_COPY8X16 | MODE_COPY8X8 => {
+      copy_vbs_from_reference(
+        recon,
+        reference,
+        mb_index,
+        choice.vbs_shape.expect("VBS choice has shape"),
+        &choice.mvs,
+      );
+    }
+    _ => copy_mb_from_eye(recon, src, mb_index),
+  }
+}
+
+fn build_segment_map(segment_ids: &[u8]) -> Vec<u8> {
+  let mut out = Vec::new();
+  let mut i = 0;
+  while i < segment_ids.len() {
+    let id = segment_ids[i];
+    let mut run = 1usize;
+    while i + run < segment_ids.len()
+      && segment_ids[i + run] == id
+      && run < 256
+    {
+      run += 1;
+    }
+    out.push((run - 1) as u8);
+    out.push(id);
+    i += run;
+  }
+  out
+}
+
+fn find_base_mv(src: &EyeFrame, reference: &EyeFrame) -> Mv {
+  let mut best = Mv::ZERO;
+  let mut best_sad = u64::MAX;
+  for y in -4..=4 {
+    for x in -4..=4 {
+      let mv = Mv { x, y };
+      let sad = sampled_eye_sad(src, reference, mv);
+      if sad < best_sad {
+        best_sad = sad;
+        best = mv;
+      }
+    }
+  }
+  best
+}
+
+fn sampled_eye_sad(src: &EyeFrame, reference: &EyeFrame, mv: Mv) -> u64 {
+  let mut sad = 0u64;
+  for y in (0..EYE_H).step_by(4) {
+    for x in (0..EYE_W).step_by(4) {
+      let sx = (x as i32 + mv.x as i32).clamp(0, EYE_W as i32 - 1) as usize;
+      let sy = (y as i32 + mv.y as i32).clamp(0, EYE_H as i32 - 1) as usize;
+      sad += (src.y[y * EYE_W + x] as i32
+        - reference.y[sy * EYE_W + sx] as i32)
+        .unsigned_abs() as u64;
+    }
+  }
+  sad
 }
 
 fn find_exact_copy(
@@ -296,7 +570,114 @@ fn copy_matches(
   true
 }
 
-fn build_dc_residual(
+fn find_best_copy_mv(
+  src: &EyeFrame, reference: &EyeFrame, mb_index: usize,
+) -> Mv {
+  let mut best = Mv::ZERO;
+  let mut best_sad = u64::MAX;
+  for y in -8..=8 {
+    for x in -8..=8 {
+      let mv = Mv { x, y };
+      let sad = partition_sad(src, reference, mb_index, 0, 0, 16, 16, mv)
+        + chroma_mb_sad(src, reference, mb_index, mv);
+      if sad < best_sad {
+        best_sad = sad;
+        best = mv;
+      }
+    }
+  }
+  best
+}
+
+fn find_best_vbs_mvs(
+  src: &EyeFrame, reference: &EyeFrame, mb_index: usize, shape: VbsShape,
+) -> Vec<Mv> {
+  match shape {
+    VbsShape::Split16x8 => vec![
+      find_best_partition_mv(src, reference, mb_index, 0, 0, 16, 8),
+      find_best_partition_mv(src, reference, mb_index, 0, 8, 16, 8),
+    ],
+    VbsShape::Split8x16 => vec![
+      find_best_partition_mv(src, reference, mb_index, 0, 0, 8, 16),
+      find_best_partition_mv(src, reference, mb_index, 8, 0, 8, 16),
+    ],
+    VbsShape::Split8x8 => vec![
+      find_best_partition_mv(src, reference, mb_index, 0, 0, 8, 8),
+      find_best_partition_mv(src, reference, mb_index, 8, 0, 8, 8),
+      find_best_partition_mv(src, reference, mb_index, 0, 8, 8, 8),
+      find_best_partition_mv(src, reference, mb_index, 8, 8, 8, 8),
+    ],
+  }
+}
+
+fn find_best_partition_mv(
+  src: &EyeFrame, reference: &EyeFrame, mb_index: usize, part_x: usize,
+  part_y: usize, part_w: usize, part_h: usize,
+) -> Mv {
+  let mut best = Mv::ZERO;
+  let mut best_sad = u64::MAX;
+  for y in -8..=8 {
+    for x in -8..=8 {
+      let mv = Mv { x, y };
+      let sad = partition_sad(
+        src, reference, mb_index, part_x, part_y, part_w, part_h, mv,
+      );
+      if sad < best_sad {
+        best_sad = sad;
+        best = mv;
+      }
+    }
+  }
+  best
+}
+
+fn partition_sad(
+  src: &EyeFrame, reference: &EyeFrame, mb_index: usize, part_x: usize,
+  part_y: usize, part_w: usize, part_h: usize, mv: Mv,
+) -> u64 {
+  let mb_x = mb_index % MB_W;
+  let mb_y = mb_index / MB_W;
+  let mut sad = 0u64;
+  for row in 0..part_h {
+    for col in 0..part_w {
+      let x = mb_x * 16 + part_x + col;
+      let y = mb_y * 16 + part_y + row;
+      let sx = (x as i32 + mv.x as i32).clamp(0, EYE_W as i32 - 1) as usize;
+      let sy = (y as i32 + mv.y as i32).clamp(0, EYE_H as i32 - 1) as usize;
+      sad += (src.y[y * EYE_W + x] as i32
+        - reference.y[sy * EYE_W + sx] as i32)
+        .unsigned_abs() as u64;
+    }
+  }
+  sad
+}
+
+fn chroma_mb_sad(
+  src: &EyeFrame, reference: &EyeFrame, mb_index: usize, mv: Mv,
+) -> u64 {
+  let mb_x = mb_index % MB_W;
+  let mb_y = mb_index / MB_W;
+  let cmv_x = (mv.x as i32) >> 1;
+  let cmv_y = (mv.y as i32) >> 1;
+  let mut sad = 0u64;
+  for row in 0..8 {
+    for col in 0..8 {
+      let x = mb_x * 8 + col;
+      let y = mb_y * 8 + row;
+      let sx = (x as i32 + cmv_x).clamp(0, CHROMA_W as i32 - 1) as usize;
+      let sy = (y as i32 + cmv_y).clamp(0, CHROMA_H as i32 - 1) as usize;
+      sad += (src.cb[y * CHROMA_W + x] as i32
+        - reference.cb[sy * CHROMA_W + sx] as i32)
+        .unsigned_abs() as u64;
+      sad += (src.cr[y * CHROMA_W + x] as i32
+        - reference.cr[sy * CHROMA_W + sx] as i32)
+        .unsigned_abs() as u64;
+    }
+  }
+  sad
+}
+
+fn build_lossless_residual(
   src: &EyeFrame, pred: &EyeFrame, mb_index: usize,
 ) -> Option<Vec<u8>> {
   let mut mask = 0u32;
@@ -305,7 +686,9 @@ fn build_dc_residual(
   for block in 0..16 {
     let bx = (mb_index % MB_W) * 16 + (block % 4) * 4;
     let by = (mb_index / MB_W) * 16 + (block / 4) * 4;
-    if let Some(payload) = dc_block_payload(&src.y, &pred.y, EYE_W, bx, by) {
+    if let Some(payload) =
+      lossless_block_payload(&src.y, &pred.y, EYE_W, bx, by)
+    {
       if !payload.is_empty() {
         mask |= 1 << block;
         payloads.push(payload);
@@ -318,7 +701,7 @@ fn build_dc_residual(
     let bx = (mb_index % MB_W) * 8 + (block % 2) * 4;
     let by = (mb_index / MB_W) * 8 + (block / 2) * 4;
     if let Some(payload) =
-      dc_block_payload(&src.cb, &pred.cb, CHROMA_W, bx, by)
+      lossless_block_payload(&src.cb, &pred.cb, CHROMA_W, bx, by)
     {
       if !payload.is_empty() {
         mask |= 1 << (16 + block);
@@ -332,7 +715,7 @@ fn build_dc_residual(
     let bx = (mb_index % MB_W) * 8 + (block % 2) * 4;
     let by = (mb_index / MB_W) * 8 + (block / 2) * 4;
     if let Some(payload) =
-      dc_block_payload(&src.cr, &pred.cr, CHROMA_W, bx, by)
+      lossless_block_payload(&src.cr, &pred.cr, CHROMA_W, bx, by)
     {
       if !payload.is_empty() {
         mask |= 1 << (20 + block);
@@ -355,20 +738,36 @@ fn build_dc_residual(
   Some(out)
 }
 
-fn dc_block_payload(
+fn lossless_block_payload(
   src: &[u8], pred: &[u8], stride: usize, x: usize, y: usize,
 ) -> Option<Vec<u8>> {
   let first = src[y * stride + x] as i16 - pred[y * stride + x] as i16;
+  let mut constant_delta = true;
+  let mut equal = first == 0;
   for row in 0..4 {
     for col in 0..4 {
       let idx = (y + row) * stride + x + col;
-      if src[idx] as i16 - pred[idx] as i16 != first {
-        return None;
+      let delta = src[idx] as i16 - pred[idx] as i16;
+      if delta != first {
+        constant_delta = false;
+      }
+      if delta != 0 {
+        equal = false;
       }
     }
   }
-  if first == 0 {
+  if equal {
     return Some(Vec::new());
+  }
+
+  if !constant_delta {
+    let mut out = Vec::with_capacity(17);
+    out.push(TAG_RAW_4X4);
+    for row in 0..4 {
+      let src_off = (y + row) * stride + x;
+      out.extend_from_slice(&src[src_off..src_off + 4]);
+    }
+    return Some(out);
   }
 
   let qdc = first * 8;
@@ -381,6 +780,15 @@ fn dc_block_payload(
     out.extend_from_slice(&qdc.to_le_bytes());
   }
   Some(out)
+}
+
+fn residual_decode_cost(residual: &[u8]) -> usize {
+  if residual.len() < 4 {
+    return 0;
+  }
+  let mask =
+    u32::from_le_bytes([residual[0], residual[1], residual[2], residual[3]]);
+  (mask.count_ones() as usize) * 3
 }
 
 fn mb_equal(a: &EyeFrame, b: &EyeFrame, mb_index: usize) -> bool {
@@ -420,6 +828,9 @@ fn copy_mb_from_eye(dst: &mut EyeFrame, src: &EyeFrame, mb_index: usize) {
 fn add_stats(total: &mut FrameStats, frame: &FrameStats) {
   total.skip_mb += frame.skip_mb;
   total.copy16_mb += frame.copy16_mb;
+  total.copy16_res_mb += frame.copy16_res_mb;
+  total.vbs_mb += frame.vbs_mb;
+  total.vbs_res_mb += frame.vbs_res_mb;
   total.base_res_mb += frame.base_res_mb;
   total.raw_mb += frame.raw_mb;
 }
@@ -427,6 +838,7 @@ fn add_stats(total: &mut FrameStats, frame: &FrameStats) {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use minidecoder::MB_COUNT;
 
   fn solid_frame(y: u8, cb: u8, cr: u8) -> SbsFrame {
     let mut frame = SbsFrame::new();
@@ -449,9 +861,9 @@ mod tests {
     write_key_raw_frame(&mut stream, 0, &first);
 
     let (left_tile, left_recon, left_stats) =
-      encode_tile(0, &second.left, &first.left);
+      encode_tile(0, &second.left, &first.left, true);
     let (right_tile, right_recon, right_stats) =
-      encode_tile(1, &second.right, &first.right);
+      encode_tile(1, &second.right, &first.right, true);
     assert_eq!(left_stats.base_res_mb + right_stats.base_res_mb, MB_COUNT * 2);
     write_p_frame(&mut stream, 1, left_tile, right_tile);
 

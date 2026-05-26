@@ -27,6 +27,12 @@ pub const FRAME_TYPE_P: u8 = 2;
 pub const MODE_BASE_RES: u8 = 0;
 pub const MODE_COPY16: u8 = 1;
 pub const MODE_COPY16_RES: u8 = 2;
+pub const MODE_COPY16X8: u8 = 3;
+pub const MODE_COPY16X8_RES: u8 = 4;
+pub const MODE_COPY8X16: u8 = 5;
+pub const MODE_COPY8X16_RES: u8 = 6;
+pub const MODE_COPY8X8: u8 = 7;
+pub const MODE_COPY8X8_RES: u8 = 8;
 pub const MODE_RAW_MB: u8 = 10;
 
 pub const TAG_DC_ONLY_S8: u8 = 0x00;
@@ -192,6 +198,7 @@ pub struct EncodedFragment {
   pub row_count: u8,
   pub start_mb: u16,
   pub mb_count: u16,
+  pub segment_map_stream: Vec<u8>,
   pub mode_stream: Vec<u8>,
   pub residual_stream: Vec<u8>,
   pub raw_stream: Vec<u8>,
@@ -208,6 +215,7 @@ impl EncodedFragment {
       row_count: MB_H as u8,
       start_mb: 0,
       mb_count: MB_COUNT as u16,
+      segment_map_stream: Vec::new(),
       mode_stream,
       residual_stream,
       raw_stream,
@@ -219,6 +227,7 @@ impl EncodedFragment {
 pub struct EncodedTile {
   pub tile_id: u8,
   pub base_mv: Mv,
+  pub segment_count: u8,
   pub fragments: Vec<EncodedFragment>,
 }
 
@@ -385,7 +394,7 @@ fn write_tile(out: &mut Vec<u8>, tile: &EncodedTile) {
   out.push(tile.base_mv.y as u8);
   out.push(64);
   out.push(64);
-  out.push(1);
+  out.push(tile.segment_count);
   out.push(tile.fragments.len() as u8);
   put_u16(out, 0);
   put_u32(out, payload.len() as u32);
@@ -399,11 +408,12 @@ fn write_fragment(out: &mut Vec<u8>, fragment: &EncodedFragment) {
   out.push(0);
   put_u16(out, fragment.start_mb);
   put_u16(out, fragment.mb_count);
-  put_u32(out, 0);
+  put_u32(out, fragment.segment_map_stream.len() as u32);
   put_u32(out, fragment.mode_stream.len() as u32);
   put_u32(out, fragment.residual_stream.len() as u32);
   put_u32(out, fragment.raw_stream.len() as u32);
   put_u32(out, 0);
+  out.extend_from_slice(&fragment.segment_map_stream);
   out.extend_from_slice(&fragment.mode_stream);
   out.extend_from_slice(&fragment.residual_stream);
   out.extend_from_slice(&fragment.raw_stream);
@@ -494,7 +504,7 @@ fn decode_tile(
   }
   if q_y > 127
     || q_uv > 127
-    || segment_count != 1
+    || !(1..=4).contains(&segment_count)
     || fragment_count == 0
     || tile_flags != 0
   {
@@ -512,7 +522,7 @@ fn decode_tile(
 
   let mut tr = Reader::new(payload);
   for _ in 0..fragment_count {
-    decode_fragment(&mut tr, tile_id, ref_eye, cur_eye)?;
+    decode_fragment(&mut tr, tile_id, segment_count, ref_eye, cur_eye)?;
   }
   if tr.remaining() != 0 {
     return Err(Error::Invalid("unconsumed tile payload".into()));
@@ -521,7 +531,7 @@ fn decode_tile(
 }
 
 fn decode_fragment(
-  r: &mut Reader<'_>, tile_id: u8, reference: &EyeFrame,
+  r: &mut Reader<'_>, tile_id: u8, segment_count: u8, reference: &EyeFrame,
   current: &mut EyeFrame,
 ) -> Result<()> {
   if r.remaining() < FRAGMENT_HEADER_SIZE {
@@ -542,11 +552,6 @@ fn decode_fragment(
   if frag_tile_id != tile_id || flags != 0 || crc != 0 {
     return Err(Error::Invalid("invalid fragment header".into()));
   }
-  if segment_map_size != 0 {
-    return Err(Error::Unsupported(
-      "segment maps are not implemented yet".into(),
-    ));
-  }
   if start_mb >= MB_COUNT || mb_count == 0 || start_mb + mb_count > MB_COUNT {
     return Err(Error::Invalid("fragment MB range out of bounds".into()));
   }
@@ -564,6 +569,8 @@ fn decode_fragment(
     ));
   }
 
+  let segment_map = r.take(segment_map_size)?;
+  validate_segment_map(segment_map, segment_count, mb_count)?;
   let mode_stream = r.take(mode_size)?;
   let residual_stream = r.take(residual_size)?;
   let raw_stream = r.take(raw_size)?;
@@ -623,6 +630,39 @@ fn decode_fragment(
   Ok(())
 }
 
+fn validate_segment_map(
+  bytes: &[u8], segment_count: u8, mb_count: usize,
+) -> Result<()> {
+  if segment_count == 1 {
+    if !bytes.is_empty() {
+      return Err(Error::Invalid(
+        "segment map present when segment_count is 1".into(),
+      ));
+    }
+    return Ok(());
+  }
+
+  let mut r = Reader::new(bytes);
+  let mut described = 0usize;
+  while described < mb_count {
+    let run = r.u8()? as usize + 1;
+    let segment_id = r.u8()?;
+    if segment_id >= segment_count {
+      return Err(Error::Invalid("segment id out of range".into()));
+    }
+    described = described
+      .checked_add(run)
+      .ok_or_else(|| Error::Invalid("segment map run overflow".into()))?;
+    if described > mb_count {
+      return Err(Error::Invalid("segment map exceeds fragment".into()));
+    }
+  }
+  if r.remaining() != 0 {
+    return Err(Error::Invalid("segment map was not fully consumed".into()));
+  }
+  Ok(())
+}
+
 fn decode_one_mb(
   mode: u8, mb_index: usize, mode_stream: &mut Reader<'_>,
   residual: &mut Reader<'_>, raw: &mut Reader<'_>, reference: &EyeFrame,
@@ -640,6 +680,82 @@ fn decode_one_mb(
       copy_mb_from_reference(current, reference, mb_index, mv);
       apply_mb_residual(current, mb_index, residual)
     }
+    MODE_COPY16X8 => {
+      let mvs = [read_mv(mode_stream)?, read_mv(mode_stream)?];
+      copy_vbs_from_reference(
+        current,
+        reference,
+        mb_index,
+        VbsShape::Split16x8,
+        &mvs,
+      );
+      Ok(())
+    }
+    MODE_COPY16X8_RES => {
+      let mvs = [read_mv(mode_stream)?, read_mv(mode_stream)?];
+      copy_vbs_from_reference(
+        current,
+        reference,
+        mb_index,
+        VbsShape::Split16x8,
+        &mvs,
+      );
+      apply_mb_residual(current, mb_index, residual)
+    }
+    MODE_COPY8X16 => {
+      let mvs = [read_mv(mode_stream)?, read_mv(mode_stream)?];
+      copy_vbs_from_reference(
+        current,
+        reference,
+        mb_index,
+        VbsShape::Split8x16,
+        &mvs,
+      );
+      Ok(())
+    }
+    MODE_COPY8X16_RES => {
+      let mvs = [read_mv(mode_stream)?, read_mv(mode_stream)?];
+      copy_vbs_from_reference(
+        current,
+        reference,
+        mb_index,
+        VbsShape::Split8x16,
+        &mvs,
+      );
+      apply_mb_residual(current, mb_index, residual)
+    }
+    MODE_COPY8X8 => {
+      let mvs = [
+        read_mv(mode_stream)?,
+        read_mv(mode_stream)?,
+        read_mv(mode_stream)?,
+        read_mv(mode_stream)?,
+      ];
+      copy_vbs_from_reference(
+        current,
+        reference,
+        mb_index,
+        VbsShape::Split8x8,
+        &mvs,
+      );
+      Ok(())
+    }
+    MODE_COPY8X8_RES => {
+      let mvs = [
+        read_mv(mode_stream)?,
+        read_mv(mode_stream)?,
+        read_mv(mode_stream)?,
+        read_mv(mode_stream)?,
+      ];
+      copy_vbs_from_reference(
+        current,
+        reference,
+        mb_index,
+        VbsShape::Split8x8,
+        &mvs,
+      );
+      apply_mb_residual(current, mb_index, residual)
+    }
     MODE_RAW_MB => {
       let bytes = raw.take(RAW_MB_BYTES)?;
       write_raw_mb(current, mb_index, bytes);
@@ -647,6 +763,10 @@ fn decode_one_mb(
     }
     _ => Err(Error::Unsupported(format!("MB mode {mode}"))),
   }
+}
+
+fn read_mv(r: &mut Reader<'_>) -> Result<Mv> {
+  Ok(Mv { x: r.i8()?, y: r.i8()? })
 }
 
 fn apply_mb_residual(
@@ -857,6 +977,142 @@ pub fn copy_mb_from_reference(
   );
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VbsShape {
+  Split16x8,
+  Split8x16,
+  Split8x8,
+}
+
+pub fn copy_vbs_from_reference(
+  dst: &mut EyeFrame, src: &EyeFrame, mb_index: usize, shape: VbsShape,
+  mvs: &[Mv],
+) {
+  let mb_x = mb_index % MB_W;
+  let mb_y = mb_index / MB_W;
+  let base_x = mb_x * 16;
+  let base_y = mb_y * 16;
+
+  match shape {
+    VbsShape::Split16x8 => {
+      copy_rect(
+        &mut dst.y,
+        &src.y,
+        EYE_W,
+        EYE_H,
+        base_x,
+        base_y,
+        16,
+        8,
+        mvs[0].x as i32,
+        mvs[0].y as i32,
+      );
+      copy_rect(
+        &mut dst.y,
+        &src.y,
+        EYE_W,
+        EYE_H,
+        base_x,
+        base_y + 8,
+        16,
+        8,
+        mvs[1].x as i32,
+        mvs[1].y as i32,
+      );
+    }
+    VbsShape::Split8x16 => {
+      copy_rect(
+        &mut dst.y,
+        &src.y,
+        EYE_W,
+        EYE_H,
+        base_x,
+        base_y,
+        8,
+        16,
+        mvs[0].x as i32,
+        mvs[0].y as i32,
+      );
+      copy_rect(
+        &mut dst.y,
+        &src.y,
+        EYE_W,
+        EYE_H,
+        base_x + 8,
+        base_y,
+        8,
+        16,
+        mvs[1].x as i32,
+        mvs[1].y as i32,
+      );
+    }
+    VbsShape::Split8x8 => {
+      for part_y in 0..2 {
+        for part_x in 0..2 {
+          let index = part_y * 2 + part_x;
+          copy_rect(
+            &mut dst.y,
+            &src.y,
+            EYE_W,
+            EYE_H,
+            base_x + part_x * 8,
+            base_y + part_y * 8,
+            8,
+            8,
+            mvs[index].x as i32,
+            mvs[index].y as i32,
+          );
+        }
+      }
+    }
+  }
+
+  let (avg_x, avg_y) = average_mv(mvs);
+  copy_rect(
+    &mut dst.cb,
+    &src.cb,
+    CHROMA_W,
+    CHROMA_H,
+    mb_x * 8,
+    mb_y * 8,
+    8,
+    8,
+    avg_x >> 1,
+    avg_y >> 1,
+  );
+  copy_rect(
+    &mut dst.cr,
+    &src.cr,
+    CHROMA_W,
+    CHROMA_H,
+    mb_x * 8,
+    mb_y * 8,
+    8,
+    8,
+    avg_x >> 1,
+    avg_y >> 1,
+  );
+}
+
+fn average_mv(mvs: &[Mv]) -> (i32, i32) {
+  let mut x = 0i32;
+  let mut y = 0i32;
+  for mv in mvs {
+    x += mv.x as i32;
+    y += mv.y as i32;
+  }
+  let n = mvs.len() as i32;
+  (round_div_i32(x, n), round_div_i32(y, n))
+}
+
+fn round_div_i32(value: i32, divisor: i32) -> i32 {
+  if value >= 0 {
+    (value + divisor / 2) / divisor
+  } else {
+    -((-value + divisor / 2) / divisor)
+  }
+}
+
 fn motion_copy_plane(
   dst: &mut [u8], src: &[u8], w: usize, h: usize, mv_x: i32, mv_y: i32,
 ) {
@@ -1062,6 +1318,7 @@ mod tests {
     let left = EncodedTile {
       tile_id: 0,
       base_mv: Mv::ZERO,
+      segment_count: 1,
       fragments: vec![EncodedFragment::full_eye(
         0, left_modes, left_res, left_raw,
       )],
@@ -1069,6 +1326,7 @@ mod tests {
     let right = EncodedTile {
       tile_id: 1,
       base_mv: Mv::ZERO,
+      segment_count: 1,
       fragments: vec![EncodedFragment::full_eye(
         1,
         vec![0x7f, 0x7f, 0x79, 0],
@@ -1098,6 +1356,7 @@ mod tests {
     let left = EncodedTile {
       tile_id: 0,
       base_mv: Mv::ZERO,
+      segment_count: 1,
       fragments: vec![EncodedFragment::full_eye(
         0,
         vec![0x7f, 0x7f, 0x79, 0],
@@ -1108,6 +1367,7 @@ mod tests {
     let right = EncodedTile {
       tile_id: 1,
       base_mv: Mv::ZERO,
+      segment_count: 1,
       fragments: vec![EncodedFragment::full_eye(
         1,
         vec![0x7f, 0x7f, 0x79, 0],
@@ -1162,6 +1422,28 @@ mod tests {
   }
 
   #[test]
+  fn ac_mask_residual_round_trips() {
+    let mut res = Vec::new();
+    put_u32(&mut res, 0x0000_0001);
+    res.push(TAG_AC_MASK_S8);
+    res.extend_from_slice(&1u16.to_le_bytes());
+    res.push(5 * 8);
+
+    let bytes = p_with_tiles(
+      vec![0x80 | MODE_BASE_RES, 0x7f, 0x7f, 0x78, 0],
+      res,
+      vec![],
+    );
+    let frames = decode_stream(&bytes).unwrap();
+    for row in 0..4 {
+      for col in 0..4 {
+        let before = frames[0].left.y[row * EYE_W + col] as i32;
+        assert_eq!(frames[1].left.y[row * EYE_W + col], clip_u8(before + 5));
+      }
+    }
+  }
+
+  #[test]
   fn raw_mb_round_trips() {
     let mut raw = Vec::new();
     raw.resize(RAW_MB_BYTES, 77);
@@ -1198,6 +1480,87 @@ mod tests {
         );
       }
     }
+  }
+
+  #[test]
+  fn vbs_copy16x8_round_trips() {
+    let bytes = p_with_tiles(
+      vec![0x80 | MODE_COPY16X8, 1, 0, 255, 0, 0x7f, 0x7f, 0x78, 0],
+      vec![],
+      vec![],
+    );
+    let frames = decode_stream(&bytes).unwrap();
+    for row in 0..8 {
+      for col in 0..16 {
+        assert_eq!(
+          frames[1].left.y[row * EYE_W + col],
+          frames[0].left.y[row * EYE_W + col + 1]
+        );
+      }
+    }
+    for row in 8..16 {
+      for col in 0..16 {
+        let src_col = if col == 0 { 0 } else { col - 1 };
+        assert_eq!(
+          frames[1].left.y[row * EYE_W + col],
+          frames[0].left.y[row * EYE_W + src_col]
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn segment_map_and_row_bands_validate() {
+    let mut bytes = Vec::new();
+    write_file_header(&mut bytes, 2);
+    let key = patterned_frame(5);
+    write_key_raw_frame(&mut bytes, 0, &key);
+
+    let mut left_top = EncodedFragment {
+      tile_id: 0,
+      row_start: 0,
+      row_count: 5,
+      start_mb: 0,
+      mb_count: 125,
+      segment_map_stream: vec![124, 2],
+      mode_stream: vec![0x7d, 0],
+      residual_stream: vec![],
+      raw_stream: vec![],
+    };
+    let left_bottom = EncodedFragment {
+      tile_id: 0,
+      row_start: 5,
+      row_count: 10,
+      start_mb: 125,
+      mb_count: 250,
+      segment_map_stream: vec![249, 3],
+      mode_stream: vec![0x7f, 0x7b, 0],
+      residual_stream: vec![],
+      raw_stream: vec![],
+    };
+    // Exercise mixed segment runs inside a fragment.
+    left_top.segment_map_stream = vec![9, 1, 114, 2];
+
+    let left = EncodedTile {
+      tile_id: 0,
+      base_mv: Mv::ZERO,
+      segment_count: 4,
+      fragments: vec![left_top, left_bottom],
+    };
+    let right = EncodedTile {
+      tile_id: 1,
+      base_mv: Mv::ZERO,
+      segment_count: 1,
+      fragments: vec![EncodedFragment::full_eye(
+        1,
+        vec![0x7f, 0x7f, 0x79, 0],
+        vec![],
+        vec![],
+      )],
+    };
+    write_p_frame(&mut bytes, 1, left, right);
+    let frames = decode_stream(&bytes).unwrap();
+    assert_eq!(frames[1], key);
   }
 
   #[test]
