@@ -1,0 +1,12 @@
+[package]
+name = "minidecoder"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "minidecoder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "minidecoder"
+path = "src/main.rs"

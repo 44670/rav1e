@@ -124,6 +124,7 @@ tracing-subscriber = { version = "0.3.18", optional = true }
 tracing-chrome = { version = "0.7.1", optional = true }
 tracing = { version = "0.1.40", optional = true }
 aligned-vec = "0.6.0"
+minidecoder = { path = "minidecoder" }
 
 [dependencies.image]
 version = "0.25.0"
@@ -187,6 +188,11 @@ name = "rav1e-ch"
 required-features = ["binaries", "channel-api", "unstable"]
 bench = false
 
+[[bin]]
+name = "rav1e-o3yv"
+path = "src/bin/rav1e-o3yv.rs"
+bench = false
+
 [lib]
 bench = false
 
@@ -216,7 +222,7 @@ strip = "symbols"
 incremental = true
 
 [workspace]
-members = [".", "ivf"]
+members = [".", "ivf", "minidecoder"]
 
 [package.metadata.docs.rs]
 no-default-features = true
