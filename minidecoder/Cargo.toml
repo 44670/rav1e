@@ -3,6 +3,9 @@ name = "minidecoder"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+stats = []
+
 [lib]
 name = "minidecoder"
 path = "src/lib.rs"
