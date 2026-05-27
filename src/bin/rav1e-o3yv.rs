@@ -76,7 +76,7 @@ const QUALITY_RECOVERY_WINDOW_BYTES: usize = RATE_WINDOW_BYTES;
 const P_FRAME_SOFT_TARGET_MIN: usize = 60 * 1024;
 const MAX_RAW_MB_PER_P_FRAME: usize = 96;
 const MAX_AC_MASK_BLOCKS_PER_P_FRAME: usize = 3_650;
-const MAX_FULL_IDCT_BLOCKS_PER_P_FRAME: usize = 3_650;
+const MAX_FULL_IDCT_BLOCKS_PER_P_FRAME: usize = 256;
 const MAX_P_DECODE_WORK_UNITS: usize = 2_200_000;
 const BUDGET_Q_STEPS: [i16; 8] = [4, 8, 12, 16, 24, 32, 48, 64];
 const QUALITY_RECOVERY_Q_STEP: i16 = 1;
@@ -2114,6 +2114,20 @@ mod tests {
       64 * 1024,
       &recent_frame_bytes
     ));
+  }
+
+  #[test]
+  fn p_frame_budget_check_enforces_full_idct_cap() {
+    let mut stats = FrameStats {
+      p_frame_bytes: 1,
+      decode_work_units: 1,
+      full_idct_blocks: MAX_FULL_IDCT_BLOCKS_PER_P_FRAME,
+      ..Default::default()
+    };
+
+    assert!(p_frame_satisfies_budget(&stats, 64 * 1024));
+    stats.full_idct_blocks += 1;
+    assert!(!p_frame_satisfies_budget(&stats, 64 * 1024));
   }
 
   #[test]
