@@ -43,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let mut decoder = StreamDecoder::new(&bytes)?;
 
   ALLOCATIONS.store(0, Ordering::Relaxed);
+  decoder.reset()?;
   let mut frames = 0usize;
   while decoder.next_frame()?.is_some() {
     frames += 1;

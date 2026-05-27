@@ -405,6 +405,12 @@ impl<'a> StreamDecoder<'a> {
     Ok(Self { r, state: DecoderState::new() })
   }
 
+  pub fn reset(&mut self) -> Result<()> {
+    self.r.pos = 0;
+    self.state.reset();
+    parse_file_header(&mut self.r)
+  }
+
   pub fn next_frame(&mut self) -> Result<Option<DecodedFrameRef<'_>>> {
     decode_next_frame(&mut self.r, &mut self.state)
   }
@@ -2265,6 +2271,11 @@ mod tests {
     assert_eq!(*second.frame, key);
 
     assert!(decoder.next_frame().unwrap().is_none());
+
+    decoder.reset().unwrap();
+    let first_again = decoder.next_frame().unwrap().unwrap();
+    assert_eq!(first_again.frame_no, 0);
+    assert_eq!(first_again.frame_type, FRAME_TYPE_KEY_RAW);
   }
 
   #[test]
