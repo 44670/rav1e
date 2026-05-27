@@ -95,7 +95,7 @@ const QUALITY_AC_MAX_PAYLOAD_BYTES: usize = 10;
 const QUALITY_AC_MAX_BLOCK_SSE: usize = 96;
 const QUALITY_AC_MIN_SSE_GAIN: usize = 96;
 const QUALITY_RAW_4X4_LOCAL_COST: usize = 21;
-const QUALITY_AC_DECODE_COST_BIAS: usize = 9;
+const QUALITY_AC_DECODE_COST_BIAS: usize = 10;
 const QUALITY_AC_DISTORTION_COST_DIVISOR: usize = 16;
 const QUALITY_RAW_MB_RAW4X4_BLOCK_THRESHOLD: usize = 17;
 const QUALITY_RAW_MB_HARD_MARGIN: usize = 192;
@@ -513,7 +513,11 @@ fn encode_budgeted_p_frame(
     row_bands,
     EncodeMode::Lossless,
   );
-  if p_frame_satisfies_budget(&lossless.stats, max_p_frame_bytes) {
+  if p_frame_satisfies_budget_and_rate(
+    &lossless.stats,
+    max_p_frame_bytes,
+    recent_frame_bytes,
+  ) {
     return lossless;
   }
 
@@ -529,7 +533,11 @@ fn encode_budgeted_p_frame(
     if candidate.stats.p_frame_bytes < best.stats.p_frame_bytes {
       best = candidate;
     }
-    if p_frame_satisfies_budget(&best.stats, max_p_frame_bytes) {
+    if p_frame_satisfies_budget_and_rate(
+      &best.stats,
+      max_p_frame_bytes,
+      recent_frame_bytes,
+    ) {
       break;
     }
   }
@@ -564,10 +572,16 @@ fn encode_budgeted_p_frame(
     }
   }
 
-  if !p_frame_satisfies_budget(&best.stats, max_p_frame_bytes) {
-    eprintln!(
-      "warning: frame {frame_no} still exceeds budget after quantization: bytes={} raw_mb={} decode_work={} (limits: bytes<={max_p_frame_bytes}, raw_mb<={MAX_RAW_MB_PER_P_FRAME}, decode_work<={MAX_P_DECODE_WORK_UNITS})",
+  if !p_frame_satisfies_budget(&best.stats, max_p_frame_bytes)
+    || !rolling_window_allows_frame_bytes(
+      recent_frame_bytes,
       best.stats.p_frame_bytes,
+    )
+  {
+    eprintln!(
+      "warning: frame {frame_no} still exceeds budget after quantization: bytes={} rolling_1s_bytes={} raw_mb={} decode_work={} (limits: bytes<={max_p_frame_bytes}, rolling_1s_bytes<={RATE_WINDOW_BYTES}, raw_mb<={MAX_RAW_MB_PER_P_FRAME}, decode_work<={MAX_P_DECODE_WORK_UNITS})",
+      best.stats.p_frame_bytes,
+      rolling_window_bytes_after(recent_frame_bytes, best.stats.p_frame_bytes),
       best.stats.raw_mb,
       best.stats.decode_work_units
     );
@@ -617,6 +631,16 @@ fn p_frame_satisfies_budget(
     && stats.ac_mask_blocks <= MAX_AC_MASK_BLOCKS_PER_P_FRAME
     && stats.full_idct_blocks <= MAX_FULL_IDCT_BLOCKS_PER_P_FRAME
     && stats.decode_work_units <= MAX_P_DECODE_WORK_UNITS
+}
+
+fn p_frame_satisfies_budget_and_rate(
+  stats: &FrameStats, max_p_frame_bytes: usize, recent_frame_bytes: &[usize],
+) -> bool {
+  p_frame_satisfies_budget(stats, max_p_frame_bytes)
+    && rolling_window_allows_frame_bytes(
+      recent_frame_bytes,
+      stats.p_frame_bytes,
+    )
 }
 
 fn estimate_p_decode_work_units(stats: &FrameStats) -> usize {
@@ -2066,6 +2090,30 @@ mod tests {
 
     let decoded = decode_stream(&stream).unwrap();
     assert_eq!(decoded[1], candidate.recon);
+  }
+
+  #[test]
+  fn p_frame_budget_check_includes_rolling_window() {
+    let mut stats = FrameStats {
+      p_frame_bytes: 64 * 1024,
+      decode_work_units: 1,
+      ..Default::default()
+    };
+    let recent_frame_bytes = vec![RATE_WINDOW_BYTES - stats.p_frame_bytes + 1];
+
+    assert!(p_frame_satisfies_budget(&stats, 64 * 1024));
+    assert!(!p_frame_satisfies_budget_and_rate(
+      &stats,
+      64 * 1024,
+      &recent_frame_bytes
+    ));
+
+    stats.p_frame_bytes -= 1;
+    assert!(p_frame_satisfies_budget_and_rate(
+      &stats,
+      64 * 1024,
+      &recent_frame_bytes
+    ));
   }
 
   #[test]
