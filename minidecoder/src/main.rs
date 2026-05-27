@@ -7,11 +7,22 @@ use minidecoder::{
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   let options = parse_args()?;
 
   let bytes = fs::read(&options.input)?;
+  if let Some(iterations) = options.bench_iters {
+    if options.output.is_some() || options.png_dir.is_some() {
+      return Err(
+        "--bench cannot be combined with output.yuv or --png-dir".into(),
+      );
+    }
+    run_bench(&bytes, iterations)?;
+    return Ok(());
+  }
+
   if options.output.is_none() && options.png_dir.is_none() {
     let frame_count = decode_stream_for_each(&bytes, |_| {})?;
     eprintln!("decoded {frame_count} frame(s)");
@@ -50,12 +61,14 @@ struct Options {
   input: String,
   output: Option<String>,
   png_dir: Option<std::path::PathBuf>,
+  bench_iters: Option<usize>,
 }
 
 fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
   let mut input = None;
   let mut output = None;
   let mut png_dir = None;
+  let mut bench_iters = None;
 
   let mut args = env::args().skip(1);
   while let Some(arg) = args.next() {
@@ -63,6 +76,16 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
       "--png-dir" => {
         png_dir =
           Some(args.next().ok_or("--png-dir requires a directory")?.into());
+      }
+      "--bench" => {
+        let iterations = args
+          .next()
+          .ok_or("--bench requires an iteration count")?
+          .parse::<usize>()?;
+        if iterations == 0 {
+          return Err("--bench iteration count must be positive".into());
+        }
+        bench_iters = Some(iterations);
       }
       "-h" | "--help" => {
         print_usage();
@@ -79,11 +102,77 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
     return Err("missing input file".into());
   };
 
-  Ok(Options { input, output, png_dir })
+  Ok(Options { input, output, png_dir, bench_iters })
 }
 
 fn print_usage() {
-  eprintln!("usage: minidecoder <input.o3yv> [output.yuv] [--png-dir DIR]");
+  eprintln!(
+    "usage: minidecoder <input.o3yv> [output.yuv] [--png-dir DIR] [--bench N]"
+  );
+}
+
+fn run_bench(
+  bytes: &[u8], iterations: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+  let mut times = Vec::with_capacity(iterations);
+  let mut frames_per_iter = None;
+
+  for _ in 0..iterations {
+    let start = Instant::now();
+    let frames = decode_stream_for_each(bytes, |_| {})?;
+    let elapsed = start.elapsed();
+    if let Some(expected) = frames_per_iter {
+      if frames != expected {
+        return Err(
+          "decoded frame count changed across bench iterations".into(),
+        );
+      }
+    } else {
+      frames_per_iter = Some(frames);
+    }
+    times.push(elapsed);
+  }
+
+  let frames = frames_per_iter.unwrap_or(0);
+  if frames == 0 {
+    return Err("cannot benchmark an empty stream".into());
+  }
+
+  times.sort_unstable();
+  let mean = mean_duration(&times);
+  let min = times[0];
+  let median = percentile_duration(&times, 50);
+  let p95 = percentile_duration(&times, 95);
+  let p99 = percentile_duration(&times, 99);
+  let max = times[times.len() - 1];
+
+  eprintln!("bench_iterations={iterations}");
+  eprintln!("frames_per_iteration={frames}");
+  eprintln!(
+    "ms_per_frame mean={:.3} min={:.3} median={:.3} p95={:.3} p99={:.3} max={:.3}",
+    ms_per_frame(mean, frames),
+    ms_per_frame(min, frames),
+    ms_per_frame(median, frames),
+    ms_per_frame(p95, frames),
+    ms_per_frame(p99, frames),
+    ms_per_frame(max, frames),
+  );
+  Ok(())
+}
+
+fn mean_duration(times: &[Duration]) -> Duration {
+  let total_secs = times.iter().map(Duration::as_secs_f64).sum::<f64>();
+  Duration::from_secs_f64(total_secs / times.len() as f64)
+}
+
+fn percentile_duration(times: &[Duration], percentile: usize) -> Duration {
+  let len = times.len();
+  let rank = (percentile * len).div_ceil(100).saturating_sub(1);
+  times[rank.min(len - 1)]
+}
+
+fn ms_per_frame(duration: Duration, frames: usize) -> f64 {
+  duration.as_secs_f64() * 1000.0 / frames as f64
 }
 
 fn png_frame_kind(
