@@ -160,6 +160,13 @@ impl Default for SbsFrame {
   }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedFrame {
+  pub frame_no: u32,
+  pub frame_type: u8,
+  pub frame: SbsFrame,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mv {
   pub x: i8,
@@ -281,6 +288,15 @@ pub fn write_p_frame(
 }
 
 pub fn decode_stream(bytes: &[u8]) -> Result<Vec<SbsFrame>> {
+  Ok(
+    decode_stream_with_metadata(bytes)?
+      .into_iter()
+      .map(|decoded| decoded.frame)
+      .collect(),
+  )
+}
+
+pub fn decode_stream_with_metadata(bytes: &[u8]) -> Result<Vec<DecodedFrame>> {
   let mut r = Reader::new(bytes);
   parse_file_header(&mut r)?;
 
@@ -357,7 +373,7 @@ pub fn decode_stream(bytes: &[u8]) -> Result<Vec<SbsFrame>> {
 
     r.pos = payload_end;
     reference = Some(frame.clone());
-    frames.push(frame);
+    frames.push(DecodedFrame { frame_no, frame_type, frame });
   }
 
   Ok(frames)
@@ -1379,6 +1395,21 @@ mod tests {
     let frames = decode_stream(&bytes).unwrap();
     assert_eq!(frames[0], key);
     assert_eq!(frames[1], key);
+  }
+
+  #[test]
+  fn decoded_metadata_marks_raw_and_p_frames() {
+    let frames = decode_stream_with_metadata(&p_with_tiles(
+      vec![0x7f, 0x7f, 0x79, 0],
+      vec![],
+      vec![],
+    ))
+    .unwrap();
+
+    assert_eq!(frames[0].frame_no, 0);
+    assert_eq!(frames[0].frame_type, FRAME_TYPE_KEY_RAW);
+    assert_eq!(frames[1].frame_no, 1);
+    assert_eq!(frames[1].frame_type, FRAME_TYPE_P);
   }
 
   #[test]

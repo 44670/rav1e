@@ -1,7 +1,7 @@
 use image::{Rgb, RgbImage};
 use minidecoder::{
-  decode_stream, SbsFrame, CHROMA_W, EYE_H, EYE_W, SBS_FRAME_BYTES, VISIBLE_H,
-  VISIBLE_W,
+  decode_stream_with_metadata, SbsFrame, CHROMA_W, EYE_H, EYE_W,
+  FRAME_TYPE_KEY_RAW, FRAME_TYPE_P, SBS_FRAME_BYTES, VISIBLE_H, VISIBLE_W,
 };
 use std::env;
 use std::fs;
@@ -11,13 +11,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let options = parse_args()?;
 
   let bytes = fs::read(&options.input)?;
-  let frames = decode_stream(&bytes)?;
+  let frames = decode_stream_with_metadata(&bytes)?;
   eprintln!("decoded {} frame(s)", frames.len());
 
   if let Some(output) = options.output {
     let mut out = Vec::with_capacity(frames.len() * SBS_FRAME_BYTES);
-    for frame in &frames {
-      out.extend_from_slice(&frame.to_yuv420_sbs());
+    for decoded in &frames {
+      out.extend_from_slice(&decoded.frame.to_yuv420_sbs());
     }
     if output == "-" {
       io::stdout().write_all(&out)?;
@@ -28,9 +28,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
   if let Some(png_dir) = options.png_dir {
     fs::create_dir_all(&png_dir)?;
-    for (index, frame) in frames.iter().enumerate() {
-      let path = png_dir.join(format!("frame_{index:06}.png"));
-      frame_to_rgb(frame).save(&path)?;
+    for (index, decoded) in frames.iter().enumerate() {
+      let kind = png_frame_kind(decoded.frame_type)?;
+      let path = png_dir.join(format!("f_{index:05}_{kind}.png"));
+      frame_to_rgb(&decoded.frame).save(&path)?;
       eprintln!("wrote {}", path.display());
     }
   }
@@ -76,6 +77,16 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
 
 fn print_usage() {
   eprintln!("usage: minidecoder <input.o3yv> [output.yuv] [--png-dir DIR]");
+}
+
+fn png_frame_kind(
+  frame_type: u8,
+) -> Result<&'static str, Box<dyn std::error::Error>> {
+  match frame_type {
+    FRAME_TYPE_KEY_RAW => Ok("raw"),
+    FRAME_TYPE_P => Ok("p"),
+    _ => Err(format!("unsupported frame type {frame_type}").into()),
+  }
 }
 
 fn frame_to_rgb(frame: &SbsFrame) -> RgbImage {
