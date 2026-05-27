@@ -935,13 +935,19 @@ fn add_dc_block(
     return;
   }
 
-  for row in 0..4 {
-    let base = (y + row) * stride + x;
-    for col in 0..4 {
-      let idx = base + col;
-      plane[idx] = clip_u8(plane[idx] as i32 + delta);
-    }
-  }
+  let base = y * stride + x;
+  add_dc_row4(plane, base, delta);
+  add_dc_row4(plane, base + stride, delta);
+  add_dc_row4(plane, base + stride * 2, delta);
+  add_dc_row4(plane, base + stride * 3, delta);
+}
+
+#[inline(always)]
+fn add_dc_row4(plane: &mut [u8], idx: usize, delta: i32) {
+  plane[idx] = clip_u8(plane[idx] as i32 + delta);
+  plane[idx + 1] = clip_u8(plane[idx + 1] as i32 + delta);
+  plane[idx + 2] = clip_u8(plane[idx + 2] as i32 + delta);
+  plane[idx + 3] = clip_u8(plane[idx + 3] as i32 + delta);
 }
 
 #[inline(always)]
