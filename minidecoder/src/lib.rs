@@ -942,30 +942,42 @@ fn add_dc_block(
 fn add_idct_block(
   plane: &mut [u8], stride: usize, x: usize, y: usize, coeffs: [i32; 16],
 ) {
-  let mut tmp = [0i32; 16];
-  for col in 0..4 {
-    let a1 = coeffs[col] + coeffs[8 + col];
-    let b1 = coeffs[col] - coeffs[8 + col];
-    let c1 = ((coeffs[4 + col] * 35468) >> 16) - coeffs[12 + col];
-    let d1 = coeffs[4 + col] + ((coeffs[12 + col] * 35468) >> 16);
-    tmp[col] = a1 + d1;
-    tmp[4 + col] = b1 + c1;
-    tmp[8 + col] = b1 - c1;
-    tmp[12 + col] = a1 - d1;
-  }
+  let (t0, t4, t8, t12) =
+    idct_1d(coeffs[0], coeffs[4], coeffs[8], coeffs[12]);
+  let (t1, t5, t9, t13) =
+    idct_1d(coeffs[1], coeffs[5], coeffs[9], coeffs[13]);
+  let (t2, t6, t10, t14) =
+    idct_1d(coeffs[2], coeffs[6], coeffs[10], coeffs[14]);
+  let (t3, t7, t11, t15) =
+    idct_1d(coeffs[3], coeffs[7], coeffs[11], coeffs[15]);
 
-  for row in 0..4 {
-    let base = row * 4;
-    let a1 = tmp[base] + tmp[base + 2];
-    let b1 = tmp[base] - tmp[base + 2];
-    let c1 = ((tmp[base + 1] * 35468) >> 16) - tmp[base + 3];
-    let d1 = tmp[base + 1] + ((tmp[base + 3] * 35468) >> 16);
-    let vals = [a1 + d1, b1 + c1, b1 - c1, a1 - d1];
-    for (col, value) in vals.iter().enumerate() {
-      let idx = (y + row) * stride + x + col;
-      plane[idx] = clip_u8(plane[idx] as i32 + ((value + 4) >> 3));
-    }
-  }
+  let (v0, v1, v2, v3) = idct_1d(t0, t1, t2, t3);
+  add_idct_row(plane, y * stride + x, v0, v1, v2, v3);
+  let (v0, v1, v2, v3) = idct_1d(t4, t5, t6, t7);
+  add_idct_row(plane, (y + 1) * stride + x, v0, v1, v2, v3);
+  let (v0, v1, v2, v3) = idct_1d(t8, t9, t10, t11);
+  add_idct_row(plane, (y + 2) * stride + x, v0, v1, v2, v3);
+  let (v0, v1, v2, v3) = idct_1d(t12, t13, t14, t15);
+  add_idct_row(plane, (y + 3) * stride + x, v0, v1, v2, v3);
+}
+
+#[inline(always)]
+fn idct_1d(c0: i32, c1: i32, c2: i32, c3: i32) -> (i32, i32, i32, i32) {
+  let a1 = c0 + c2;
+  let b1 = c0 - c2;
+  let c1v = ((c1 * 35468) >> 16) - c3;
+  let d1 = c1 + ((c3 * 35468) >> 16);
+  (a1 + d1, b1 + c1v, b1 - c1v, a1 - d1)
+}
+
+#[inline(always)]
+fn add_idct_row(
+  plane: &mut [u8], idx: usize, v0: i32, v1: i32, v2: i32, v3: i32,
+) {
+  plane[idx] = clip_u8(plane[idx] as i32 + ((v0 + 4) >> 3));
+  plane[idx + 1] = clip_u8(plane[idx + 1] as i32 + ((v1 + 4) >> 3));
+  plane[idx + 2] = clip_u8(plane[idx + 2] as i32 + ((v2 + 4) >> 3));
+  plane[idx + 3] = clip_u8(plane[idx + 3] as i32 + ((v3 + 4) >> 3));
 }
 
 pub fn prefill_eye(dst: &mut EyeFrame, src: &EyeFrame, mv: Mv) {
