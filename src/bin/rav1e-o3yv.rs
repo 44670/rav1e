@@ -91,6 +91,9 @@ const QUALITY_AC_MAX_EXTRA_COEFFS: usize = 6;
 const QUALITY_AC_MAX_PAYLOAD_BYTES: usize = 10;
 const QUALITY_AC_MAX_BLOCK_SSE: usize = 96;
 const QUALITY_AC_MIN_SSE_GAIN: usize = 96;
+const QUALITY_RAW_4X4_LOCAL_COST: usize = 21;
+const QUALITY_AC_DECODE_COST_BIAS: usize = 8;
+const QUALITY_AC_DISTORTION_COST_DIVISOR: usize = 16;
 const SCENE_CUT_AVG_Y_DELTA: u32 = 32;
 const SCENE_CUT_HIGH_Y_DELTA: u8 = 48;
 const SCENE_CUT_HIGH_Y_PERCENT: u32 = 25;
@@ -1577,16 +1580,18 @@ fn lossy_block_payload(
     if let Some(ac) =
       quality_ac_mask_candidate(src, pred, stride, x, y, delta, dc_distortion)
     {
-      for row in 0..4 {
-        for col in 0..4 {
-          let idx = (y + row) * stride + x + col;
-          recon[idx] = ac.values[row * 4 + col];
+      if quality_ac_beats_raw_4x4(&ac) {
+        for row in 0..4 {
+          for col in 0..4 {
+            let idx = (y + row) * stride + x + col;
+            recon[idx] = ac.values[row * 4 + col];
+          }
         }
+        *distortion += ac.distortion;
+        stats.ac_mask_blocks += 1;
+        stats.full_idct_blocks += 1;
+        return Some(ac.bytes);
       }
-      *distortion += ac.distortion;
-      stats.ac_mask_blocks += 1;
-      stats.full_idct_blocks += 1;
-      return Some(ac.bytes);
     }
 
     let mut out = Vec::with_capacity(17);
@@ -1615,6 +1620,13 @@ fn lossy_block_payload(
 
   stats.dc_only_blocks += 1;
   Some(dc_payload(delta))
+}
+
+fn quality_ac_beats_raw_4x4(ac: &AcBlockCandidate) -> bool {
+  ac.bytes.len()
+    + QUALITY_AC_DECODE_COST_BIAS
+    + ac.distortion / QUALITY_AC_DISTORTION_COST_DIVISOR
+    < QUALITY_RAW_4X4_LOCAL_COST
 }
 
 fn quality_ac_mask_candidate(
@@ -2063,6 +2075,50 @@ mod tests {
       }
     }
     assert_eq!(decoded[1].right, first.right);
+  }
+
+  #[test]
+  fn quality_recovery_prefers_raw4x4_over_costly_ac() {
+    let pred_block = [80u8; 16];
+    let mut coeffs = [0i32; 16];
+    coeffs[O3YV_ZIGZAG[1]] = 64;
+    coeffs[O3YV_ZIGZAG[2]] = -48;
+    let src_block = idct_reconstruct_block(&pred_block, coeffs);
+
+    let pred = vec![80u8; EYE_W * EYE_H];
+    let mut src = pred.clone();
+    for row in 0..4 {
+      src[row * EYE_W..row * EYE_W + 4]
+        .copy_from_slice(&src_block[row * 4..row * 4 + 4]);
+    }
+
+    let mut recon = pred.clone();
+    let mut distortion = 0usize;
+    let mut stats = ResidualStats::default();
+    let payload = lossy_block_payload(
+      &src,
+      &pred,
+      &mut recon,
+      EYE_W,
+      0,
+      0,
+      1,
+      Some(1),
+      &mut distortion,
+      &mut stats,
+    )
+    .expect("test pattern should be coded");
+
+    assert_eq!(payload[0], TAG_RAW_4X4);
+    assert_eq!(stats.raw_4x4_blocks, 1);
+    assert_eq!(stats.ac_mask_blocks, 0);
+    assert_eq!(distortion, 0);
+    for row in 0..4 {
+      assert_eq!(
+        &recon[row * EYE_W..row * EYE_W + 4],
+        &src_block[row * 4..row * 4 + 4]
+      );
+    }
   }
 
   #[test]
