@@ -20,6 +20,9 @@ const FILE_HEADER_SIZE: u16 = 60;
 const FRAME_HEADER_SIZE: usize = 28;
 const TILE_HEADER_SIZE: usize = 17;
 const FRAGMENT_HEADER_SIZE: usize = 28;
+pub const LAZY_BASE_COPY_MAX_MB_PER_TILE: usize = 128;
+pub const TILE_FLAG_LAZY_BASE_COPY: u16 = 0x0001;
+const SUPPORTED_TILE_FLAGS: u16 = TILE_FLAG_LAZY_BASE_COPY;
 
 pub const FRAME_TYPE_KEY_RAW: u8 = 0;
 pub const FRAME_TYPE_P: u8 = 2;
@@ -444,9 +447,36 @@ fn write_tile(out: &mut Vec<u8>, tile: &EncodedTile) {
   out.push(64);
   out.push(tile.segment_count);
   out.push(tile.fragments.len() as u8);
-  put_u16(out, 0);
+  put_u16(out, tile_flags_for_encoded_tile(tile));
   put_u32(out, payload.len() as u32);
   out.extend_from_slice(&payload);
+}
+
+fn tile_flags_for_encoded_tile(tile: &EncodedTile) -> u16 {
+  if encoded_tile_base_predictor_mbs(tile) <= LAZY_BASE_COPY_MAX_MB_PER_TILE {
+    TILE_FLAG_LAZY_BASE_COPY
+  } else {
+    0
+  }
+}
+
+fn encoded_tile_base_predictor_mbs(tile: &EncodedTile) -> usize {
+  let mut total = 0usize;
+  for fragment in &tile.fragments {
+    let Ok(base_mbs) = count_base_predictor_mbs_in_modes(
+      &fragment.mode_stream,
+      fragment.start_mb as usize,
+      fragment.mb_count as usize,
+      LAZY_BASE_COPY_MAX_MB_PER_TILE.saturating_sub(total),
+    ) else {
+      return LAZY_BASE_COPY_MAX_MB_PER_TILE + 1;
+    };
+    total += base_mbs;
+    if total > LAZY_BASE_COPY_MAX_MB_PER_TILE {
+      return total;
+    }
+  }
+  total
 }
 
 fn write_fragment(out: &mut Vec<u8>, fragment: &EncodedFragment) {
@@ -554,7 +584,7 @@ fn decode_tile(
     || q_uv > 127
     || !(1..=4).contains(&segment_count)
     || fragment_count == 0
-    || tile_flags != 0
+    || (tile_flags & !SUPPORTED_TILE_FLAGS) != 0
   {
     return Err(Error::Unsupported("unsupported tile options".into()));
   }
@@ -566,11 +596,23 @@ fn decode_tile(
   let ref_eye = if tile_id == 0 { &reference.left } else { &reference.right };
   let cur_eye =
     if tile_id == 0 { &mut current.left } else { &mut current.right };
-  prefill_eye(cur_eye, ref_eye, base_mv);
+  let base_copy_mode = if (tile_flags & TILE_FLAG_LAZY_BASE_COPY) != 0 {
+    BaseCopyMode::Lazy(base_mv)
+  } else {
+    prefill_eye(cur_eye, ref_eye, base_mv);
+    BaseCopyMode::Prefilled
+  };
 
   let mut tr = Reader::new(payload);
   for _ in 0..fragment_count {
-    decode_fragment(&mut tr, tile_id, segment_count, ref_eye, cur_eye)?;
+    decode_fragment(
+      &mut tr,
+      tile_id,
+      segment_count,
+      base_copy_mode,
+      ref_eye,
+      cur_eye,
+    )?;
   }
   if tr.remaining() != 0 {
     return Err(Error::Invalid("unconsumed tile payload".into()));
@@ -578,9 +620,15 @@ fn decode_tile(
   Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum BaseCopyMode {
+  Prefilled,
+  Lazy(Mv),
+}
+
 fn decode_fragment(
-  r: &mut Reader<'_>, tile_id: u8, segment_count: u8, reference: &EyeFrame,
-  current: &mut EyeFrame,
+  r: &mut Reader<'_>, tile_id: u8, segment_count: u8,
+  base_copy_mode: BaseCopyMode, reference: &EyeFrame, current: &mut EyeFrame,
 ) -> Result<()> {
   if r.remaining() < FRAGMENT_HEADER_SIZE {
     return Err(Error::Eof);
@@ -597,25 +645,16 @@ fn decode_fragment(
   let raw_size = r.u32()? as usize;
   let crc = r.u32()?;
 
-  if frag_tile_id != tile_id || flags != 0 || crc != 0 {
-    return Err(Error::Invalid("invalid fragment header".into()));
-  }
-  if start_mb >= MB_COUNT || mb_count == 0 || start_mb + mb_count > MB_COUNT {
-    return Err(Error::Invalid("fragment MB range out of bounds".into()));
-  }
-  if row_start as usize >= MB_H
-    || row_count == 0
-    || row_start as usize + row_count as usize > MB_H
-  {
-    return Err(Error::Invalid("fragment row range out of bounds".into()));
-  }
-  if start_mb != row_start as usize * MB_W
-    || mb_count != row_count as usize * MB_W
-  {
-    return Err(Error::Unsupported(
-      "only contiguous row-band fragments are supported".into(),
-    ));
-  }
+  validate_fragment_header(
+    frag_tile_id,
+    tile_id,
+    flags,
+    crc,
+    row_start,
+    row_count,
+    start_mb,
+    mb_count,
+  )?;
 
   let segment_map = r.take(segment_map_size)?;
   validate_segment_map(segment_map, segment_count, mb_count)?;
@@ -638,11 +677,23 @@ fn decode_fragment(
       if mb_index + run > end_mb {
         return Err(Error::Invalid("skip run exceeds fragment".into()));
       }
+      if let BaseCopyMode::Lazy(base_mv) = base_copy_mode {
+        for skipped in mb_index..mb_index + run {
+          copy_mb_from_reference(current, reference, skipped, base_mv);
+        }
+      }
       mb_index += run;
     } else if (op & 0xf0) == 0x80 {
       let mode = op & 0x0f;
       decode_one_mb(
-        mode, mb_index, &mut mr, &mut rr, &mut raw, reference, current,
+        mode,
+        mb_index,
+        base_copy_mode,
+        &mut mr,
+        &mut rr,
+        &mut raw,
+        reference,
+        current,
       )?;
       mb_index += 1;
     } else if (op & 0xf0) == 0x90 {
@@ -653,7 +704,14 @@ fn decode_fragment(
       }
       for _ in 0..run {
         decode_one_mb(
-          mode, mb_index, &mut mr, &mut rr, &mut raw, reference, current,
+          mode,
+          mb_index,
+          base_copy_mode,
+          &mut mr,
+          &mut rr,
+          &mut raw,
+          reference,
+          current,
         )?;
         mb_index += 1;
       }
@@ -711,14 +769,123 @@ fn validate_segment_map(
   Ok(())
 }
 
+fn validate_fragment_header(
+  frag_tile_id: u8, tile_id: u8, flags: u8, crc: u32, row_start: u8,
+  row_count: u8, start_mb: usize, mb_count: usize,
+) -> Result<()> {
+  if frag_tile_id != tile_id || flags != 0 || crc != 0 {
+    return Err(Error::Invalid("invalid fragment header".into()));
+  }
+  if start_mb >= MB_COUNT || mb_count == 0 || start_mb + mb_count > MB_COUNT {
+    return Err(Error::Invalid("fragment MB range out of bounds".into()));
+  }
+  if row_start as usize >= MB_H
+    || row_count == 0
+    || row_start as usize + row_count as usize > MB_H
+  {
+    return Err(Error::Invalid("fragment row range out of bounds".into()));
+  }
+  if start_mb != row_start as usize * MB_W
+    || mb_count != row_count as usize * MB_W
+  {
+    return Err(Error::Unsupported(
+      "only contiguous row-band fragments are supported".into(),
+    ));
+  }
+  Ok(())
+}
+
+fn count_base_predictor_mbs_in_modes(
+  mode_stream: &[u8], start_mb: usize, mb_count: usize, limit: usize,
+) -> Result<usize> {
+  let mut base_mbs = 0usize;
+  let mut r = Reader::new(mode_stream);
+  let end_mb = start_mb + mb_count;
+  let mut mb_index = start_mb;
+  while mb_index < end_mb {
+    let op = r.u8()?;
+    if op == 0 {
+      break;
+    } else if op <= 0x7f {
+      let run = op as usize;
+      if mb_index + run > end_mb {
+        return Err(Error::Invalid("skip run exceeds fragment".into()));
+      }
+      base_mbs += run;
+      if base_mbs > limit {
+        return Ok(base_mbs);
+      }
+      mb_index += run;
+    } else if (op & 0xf0) == 0x80 {
+      let mode = op & 0x0f;
+      skip_mode_payload(mode, &mut r)?;
+      if mode == MODE_BASE_RES {
+        base_mbs += 1;
+        if base_mbs > limit {
+          return Ok(base_mbs);
+        }
+      }
+      mb_index += 1;
+    } else if (op & 0xf0) == 0x90 {
+      let mode = op & 0x0f;
+      let run = r.u8()? as usize + 1;
+      if mb_index + run > end_mb {
+        return Err(Error::Invalid("mode run exceeds fragment".into()));
+      }
+      for _ in 0..run {
+        skip_mode_payload(mode, &mut r)?;
+      }
+      if mode == MODE_BASE_RES {
+        base_mbs += run;
+        if base_mbs > limit {
+          return Ok(base_mbs);
+        }
+      }
+      mb_index += run;
+    } else {
+      return Err(Error::Invalid(format!("reserved mode opcode 0x{op:02x}")));
+    }
+  }
+  if mb_index != end_mb {
+    return Err(Error::Invalid(
+      "fragment ended before all MBs were described".into(),
+    ));
+  }
+  if r.remaining() == 1 && r.bytes[r.pos] == 0 {
+    r.pos += 1;
+  }
+  if r.remaining() != 0 {
+    return Err(Error::Invalid("mode stream was not fully consumed".into()));
+  }
+  Ok(base_mbs)
+}
+
+#[inline(always)]
+fn skip_mode_payload(mode: u8, r: &mut Reader<'_>) -> Result<()> {
+  match mode {
+    MODE_BASE_RES | MODE_RAW_MB => Ok(()),
+    MODE_COPY16 | MODE_COPY16_RES => r.skip(2),
+    MODE_COPY16X8 | MODE_COPY16X8_RES | MODE_COPY8X16 | MODE_COPY8X16_RES => {
+      r.skip(4)
+    }
+    MODE_COPY8X8 | MODE_COPY8X8_RES => r.skip(8),
+    _ => Err(Error::Unsupported(format!("MB mode {mode}"))),
+  }
+}
+
 #[inline(always)]
 fn decode_one_mb(
-  mode: u8, mb_index: usize, mode_stream: &mut Reader<'_>,
-  residual: &mut Reader<'_>, raw: &mut Reader<'_>, reference: &EyeFrame,
-  current: &mut EyeFrame,
+  mode: u8, mb_index: usize, base_copy_mode: BaseCopyMode,
+  mode_stream: &mut Reader<'_>, residual: &mut Reader<'_>,
+  raw: &mut Reader<'_>, reference: &EyeFrame, current: &mut EyeFrame,
 ) -> Result<()> {
   match mode {
-    MODE_BASE_RES => apply_mb_residual(current, mb_index, residual),
+    MODE_BASE_RES => {
+      if let BaseCopyMode::Lazy(base_mv) = base_copy_mode {
+        copy_mb_from_reference(current, reference, mb_index, base_mv);
+      }
+      apply_mb_residual(current, mb_index, residual)
+    }
     MODE_COPY16 => {
       let mv = Mv { x: mode_stream.i8()?, y: mode_stream.i8()? };
       copy_mb_from_reference(current, reference, mb_index, mv);
@@ -1630,6 +1797,104 @@ mod tests {
     let frames = decode_stream(&bytes).unwrap();
     assert_eq!(frames[0], key);
     assert_eq!(frames[1], key);
+  }
+
+  #[test]
+  fn skipped_p_frame_with_base_motion_round_trips() {
+    let key = patterned_frame(2);
+    let mut bytes = Vec::new();
+    write_file_header(&mut bytes, 2);
+    write_key_raw_frame(&mut bytes, 0, &key);
+    let left = EncodedTile {
+      tile_id: 0,
+      base_mv: Mv { x: 1, y: 0 },
+      segment_count: 1,
+      fragments: vec![EncodedFragment::full_eye(
+        0,
+        vec![0x7f, 0x7f, 0x79, 0],
+        vec![],
+        vec![],
+      )],
+    };
+    let right = EncodedTile {
+      tile_id: 1,
+      base_mv: Mv { x: -1, y: 0 },
+      segment_count: 1,
+      fragments: vec![EncodedFragment::full_eye(
+        1,
+        vec![0x7f, 0x7f, 0x79, 0],
+        vec![],
+        vec![],
+      )],
+    };
+    write_p_frame(&mut bytes, 1, left, right);
+    let frames = decode_stream(&bytes).unwrap();
+    let mut expected = SbsFrame::new();
+    prefill_eye(&mut expected.left, &key.left, Mv { x: 1, y: 0 });
+    prefill_eye(&mut expected.right, &key.right, Mv { x: -1, y: 0 });
+    assert_eq!(frames[1], expected);
+  }
+
+  #[test]
+  fn sparse_base_copy_tile_round_trips() {
+    let key = patterned_frame(4);
+    let mut bytes = Vec::new();
+    write_file_header(&mut bytes, 2);
+    write_key_raw_frame(&mut bytes, 0, &key);
+
+    let mut left_modes = vec![1];
+    for _ in 1..MB_COUNT {
+      left_modes.push(0x80 | MODE_COPY16);
+      left_modes.extend_from_slice(&[0, 0]);
+    }
+    left_modes.push(0);
+
+    let left = EncodedTile {
+      tile_id: 0,
+      base_mv: Mv { x: 1, y: 0 },
+      segment_count: 1,
+      fragments: vec![EncodedFragment::full_eye(
+        0,
+        left_modes,
+        vec![],
+        vec![],
+      )],
+    };
+    let right = EncodedTile {
+      tile_id: 1,
+      base_mv: Mv::ZERO,
+      segment_count: 1,
+      fragments: vec![EncodedFragment::full_eye(
+        1,
+        vec![0x7f, 0x7f, 0x79, 0],
+        vec![],
+        vec![],
+      )],
+    };
+    write_p_frame(&mut bytes, 1, left, right);
+
+    let p_payload_start = FILE_HEADER_SIZE as usize
+      + FRAME_HEADER_SIZE
+      + SBS_FRAME_BYTES
+      + FRAME_HEADER_SIZE;
+    let tile_flags = u16::from_le_bytes([
+      bytes[p_payload_start + 11],
+      bytes[p_payload_start + 12],
+    ]);
+    assert_eq!(
+      tile_flags & TILE_FLAG_LAZY_BASE_COPY,
+      TILE_FLAG_LAZY_BASE_COPY
+    );
+
+    let frames = decode_stream(&bytes).unwrap();
+    let mut expected = key.clone();
+    copy_mb_from_reference(
+      &mut expected.left,
+      &key.left,
+      0,
+      Mv { x: 1, y: 0 },
+    );
+    assert_eq!(frames[1], expected);
   }
 
   #[test]

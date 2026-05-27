@@ -354,9 +354,11 @@ struct StreamStats {
   raw_bytes: usize,
   prefill_zero_tiles: usize,
   prefill_shift_tiles: usize,
+  lazy_base_tiles: usize,
   skip_mb: usize,
   copy16_mb: usize,
   copy_vbs_mb: usize,
+  lazy_base_copy_mb: usize,
   raw_mb: usize,
   residual_mb: usize,
   dc_only_blocks: usize,
@@ -392,9 +394,11 @@ struct FrameWorkload {
   mode_bytes: usize,
   residual_bytes: usize,
   raw_bytes: usize,
+  prefill_tiles: usize,
   skip_mb: usize,
   copy16_mb: usize,
   copy_vbs_mb: usize,
+  lazy_base_copy_mb: usize,
   raw_mb: usize,
   residual_mb: usize,
   dc_only_blocks: usize,
@@ -456,11 +460,12 @@ fn print_stream_stats(
     );
   }
   eprintln!(
-    "stats tiles={} fragments={} prefill_zero_tiles={} prefill_shift_tiles={}",
+    "stats tiles={} fragments={} prefill_zero_tiles={} prefill_shift_tiles={} lazy_base_tiles={}",
     stats.tiles,
     stats.fragments,
     stats.prefill_zero_tiles,
-    stats.prefill_shift_tiles
+    stats.prefill_shift_tiles,
+    stats.lazy_base_tiles
   );
   eprintln!(
     "stats stream_bytes segment_map={} mode={} residual={} raw={}",
@@ -470,10 +475,11 @@ fn print_stream_stats(
     stats.raw_bytes
   );
   eprintln!(
-    "stats mb skip={} copy16={} copy_vbs={} raw={} residual={}",
+    "stats mb skip={} copy16={} copy_vbs={} lazy_base_copy={} raw={} residual={}",
     stats.skip_mb,
     stats.copy16_mb,
     stats.copy_vbs_mb,
+    stats.lazy_base_copy_mb,
     stats.raw_mb,
     stats.residual_mb
   );
@@ -531,7 +537,7 @@ fn print_stream_stats(
     let frame = stats.max_p_work;
     let max_work = stats.max_p_work_breakdown;
     eprintln!(
-      "stats max_p_work frame_no={} payload_bytes={} work={} segment_map={} mode={} residual={} raw={} skip={} copy16={} copy_vbs={} raw_mb={} residual_mb={} dc_only={} full_idct={} raw_4x4={} parse={} prefill={} prediction={} raw_copy={} residual_dc={} idct={}",
+      "stats max_p_work frame_no={} payload_bytes={} work={} segment_map={} mode={} residual={} raw={} skip={} copy16={} copy_vbs={} lazy_base_copy={} raw_mb={} residual_mb={} dc_only={} full_idct={} raw_4x4={} parse={} prefill={} prediction={} raw_copy={} residual_dc={} idct={}",
       stats.max_p_work_frame_no,
       stats.max_p_work_frame_payload_bytes,
       stats.max_p_work_units,
@@ -542,6 +548,7 @@ fn print_stream_stats(
       frame.skip_mb,
       frame.copy16_mb,
       frame.copy_vbs_mb,
+      frame.lazy_base_copy_mb,
       frame.raw_mb,
       frame.residual_mb,
       frame.dc_only_blocks,
@@ -570,9 +577,11 @@ impl StreamStats {
       mode_bytes: self.mode_bytes,
       residual_bytes: self.residual_bytes,
       raw_bytes: self.raw_bytes,
+      prefill_tiles: self.prefill_zero_tiles + self.prefill_shift_tiles,
       skip_mb: self.skip_mb,
       copy16_mb: self.copy16_mb,
       copy_vbs_mb: self.copy_vbs_mb,
+      lazy_base_copy_mb: self.lazy_base_copy_mb,
       raw_mb: self.raw_mb,
       residual_mb: self.residual_mb,
       dc_only_blocks: self.dc_only_blocks,
@@ -583,7 +592,7 @@ impl StreamStats {
 
   fn record_p_workload(
     &mut self, frame_no: u32, frame_payload_bytes: usize,
-    before: FrameWorkload, tile_count: usize,
+    before: FrameWorkload,
   ) {
     let after = self.workload_snapshot();
     let frame = FrameWorkload {
@@ -591,16 +600,18 @@ impl StreamStats {
       mode_bytes: after.mode_bytes - before.mode_bytes,
       residual_bytes: after.residual_bytes - before.residual_bytes,
       raw_bytes: after.raw_bytes - before.raw_bytes,
+      prefill_tiles: after.prefill_tiles - before.prefill_tiles,
       skip_mb: after.skip_mb - before.skip_mb,
       copy16_mb: after.copy16_mb - before.copy16_mb,
       copy_vbs_mb: after.copy_vbs_mb - before.copy_vbs_mb,
+      lazy_base_copy_mb: after.lazy_base_copy_mb - before.lazy_base_copy_mb,
       raw_mb: after.raw_mb - before.raw_mb,
       residual_mb: after.residual_mb - before.residual_mb,
       dc_only_blocks: after.dc_only_blocks - before.dc_only_blocks,
       full_idct_blocks: after.full_idct_blocks - before.full_idct_blocks,
       raw_4x4_blocks: after.raw_4x4_blocks - before.raw_4x4_blocks,
     };
-    let work_units = estimate_p_work_units(&frame, tile_count);
+    let work_units = estimate_p_work_units(&frame);
     self.p_work_units += work_units.total();
     self.p_work_breakdown.add(work_units);
     if work_units.total() > self.max_p_work_units {
@@ -635,16 +646,15 @@ impl StreamStats {
 }
 
 #[cfg(feature = "stats")]
-fn estimate_p_work_units(
-  frame: &FrameWorkload, tile_count: usize,
-) -> WorkUnits {
+fn estimate_p_work_units(frame: &FrameWorkload) -> WorkUnits {
   let parse = frame.segment_map_bytes
     + frame.mode_bytes * 2
     + frame.residual_bytes * 2
     + frame.raw_bytes;
-  let prefill = tile_count * minidecoder::EYE_FRAME_BYTES;
+  let prefill = frame.prefill_tiles * minidecoder::EYE_FRAME_BYTES;
   let prediction =
-    (frame.copy16_mb + frame.copy_vbs_mb) * minidecoder::RAW_MB_BYTES;
+    (frame.copy16_mb + frame.copy_vbs_mb + frame.lazy_base_copy_mb)
+      * minidecoder::RAW_MB_BYTES;
   let raw_copy =
     frame.raw_mb * minidecoder::RAW_MB_BYTES + frame.raw_4x4_blocks * 16;
   let residual_dc = frame.residual_mb * 8 + frame.dc_only_blocks * 64;
@@ -732,12 +742,7 @@ fn collect_stream_stats(
         if pr.remaining() != 0 {
           return Err("unconsumed P-frame payload".into());
         }
-        stats.record_p_workload(
-          frame_no,
-          frame_size,
-          before,
-          tile_count as usize,
-        );
+        stats.record_p_workload(frame_no, frame_size, before);
       }
       _ => return Err(format!("unsupported frame type {frame_type}").into()),
     }
@@ -775,7 +780,7 @@ fn collect_tile_stats(
     || q_uv > 127
     || !(1..=4).contains(&segment_count)
     || fragment_count == 0
-    || tile_flags != 0
+    || (tile_flags & !minidecoder::TILE_FLAG_LAZY_BASE_COPY) != 0
   {
     return Err("invalid tile header".into());
   }
@@ -784,7 +789,11 @@ fn collect_tile_stats(
   }
 
   stats.tiles += 1;
-  if mv_x == 0 && mv_y == 0 {
+  let lazy_base_copy =
+    (tile_flags & minidecoder::TILE_FLAG_LAZY_BASE_COPY) != 0;
+  if lazy_base_copy {
+    stats.lazy_base_tiles += 1;
+  } else if mv_x == 0 && mv_y == 0 {
     stats.prefill_zero_tiles += 1;
   } else {
     stats.prefill_shift_tiles += 1;
@@ -793,7 +802,13 @@ fn collect_tile_stats(
   let payload = r.take(payload_size)?;
   let mut tr = StatsReader::new(payload);
   for _ in 0..fragment_count {
-    collect_fragment_stats(&mut tr, tile_id, segment_count, stats)?;
+    collect_fragment_stats(
+      &mut tr,
+      tile_id,
+      segment_count,
+      lazy_base_copy,
+      stats,
+    )?;
   }
   if tr.remaining() != 0 {
     return Err("unconsumed tile payload".into());
@@ -804,7 +819,7 @@ fn collect_tile_stats(
 #[cfg(feature = "stats")]
 fn collect_fragment_stats(
   r: &mut StatsReader<'_>, tile_id: u8, segment_count: u8,
-  stats: &mut StreamStats,
+  lazy_base_copy: bool, stats: &mut StreamStats,
 ) -> Result<(), Box<dyn std::error::Error>> {
   let frag_tile_id = r.u8()?;
   let row_start = r.u8()?;
@@ -861,9 +876,19 @@ fn collect_fragment_stats(
         return Err("skip run exceeds fragment".into());
       }
       stats.skip_mb += run;
+      if lazy_base_copy {
+        stats.lazy_base_copy_mb += run;
+      }
       mb_index += run;
     } else if (op & 0xf0) == 0x80 {
-      collect_mb_stats(op & 0x0f, &mut mr, &mut rr, &mut raw, stats)?;
+      collect_mb_stats(
+        op & 0x0f,
+        lazy_base_copy,
+        &mut mr,
+        &mut rr,
+        &mut raw,
+        stats,
+      )?;
       mb_index += 1;
     } else if (op & 0xf0) == 0x90 {
       let mode = op & 0x0f;
@@ -872,7 +897,14 @@ fn collect_fragment_stats(
         return Err("mode run exceeds fragment".into());
       }
       for _ in 0..run {
-        collect_mb_stats(mode, &mut mr, &mut rr, &mut raw, stats)?;
+        collect_mb_stats(
+          mode,
+          lazy_base_copy,
+          &mut mr,
+          &mut rr,
+          &mut raw,
+          stats,
+        )?;
         mb_index += 1;
       }
     } else {
@@ -923,11 +955,15 @@ fn collect_segment_map_stats(
 
 #[cfg(feature = "stats")]
 fn collect_mb_stats(
-  mode: u8, mode_stream: &mut StatsReader<'_>, residual: &mut StatsReader<'_>,
-  raw: &mut StatsReader<'_>, stats: &mut StreamStats,
+  mode: u8, lazy_base_copy: bool, mode_stream: &mut StatsReader<'_>,
+  residual: &mut StatsReader<'_>, raw: &mut StatsReader<'_>,
+  stats: &mut StreamStats,
 ) -> Result<(), Box<dyn std::error::Error>> {
   match mode {
     minidecoder::MODE_BASE_RES => {
+      if lazy_base_copy {
+        stats.lazy_base_copy_mb += 1;
+      }
       stats.residual_mb += 1;
       collect_residual_stats(residual, stats)
     }

@@ -2,11 +2,11 @@ use minidecoder::{
   copy_mb_from_reference, copy_vbs_from_reference, decode_stream, prefill_eye,
   read_raw_mb, write_file_header, write_key_raw_frame, write_p_frame,
   EncodedFragment, EncodedTile, EyeFrame, Mv, SbsFrame, VbsShape, CHROMA_H,
-  CHROMA_W, EYE_FRAME_BYTES, EYE_H, EYE_W, MB_H, MB_W, MODE_BASE_RES,
-  MODE_COPY16, MODE_COPY16X8, MODE_COPY16X8_RES, MODE_COPY16_RES,
-  MODE_COPY8X16, MODE_COPY8X16_RES, MODE_COPY8X8, MODE_COPY8X8_RES,
-  MODE_RAW_MB, RAW_MB_BYTES, SBS_FRAME_BYTES, TAG_AC_MASK_S8, TAG_DC_ONLY_S16,
-  TAG_DC_ONLY_S8, TAG_RAW_4X4,
+  CHROMA_W, EYE_FRAME_BYTES, EYE_H, EYE_W, LAZY_BASE_COPY_MAX_MB_PER_TILE,
+  MB_H, MB_W, MODE_BASE_RES, MODE_COPY16, MODE_COPY16X8, MODE_COPY16X8_RES,
+  MODE_COPY16_RES, MODE_COPY8X16, MODE_COPY8X16_RES, MODE_COPY8X8,
+  MODE_COPY8X8_RES, MODE_RAW_MB, RAW_MB_BYTES, SBS_FRAME_BYTES,
+  TAG_AC_MASK_S8, TAG_DC_ONLY_S16, TAG_DC_ONLY_S8, TAG_RAW_4X4,
 };
 use std::env;
 use std::fs;
@@ -31,6 +31,8 @@ struct FrameStats {
   vbs_mb: usize,
   vbs_res_mb: usize,
   base_res_mb: usize,
+  prefill_tiles: usize,
+  lazy_base_copy_mb: usize,
   raw_mb: usize,
   p_frame_bytes: usize,
   raw_4x4_blocks: usize,
@@ -303,7 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       add_stats(&mut total, &candidate.stats);
       total.p_frame_bytes += candidate.stats.p_frame_bytes;
       eprintln!(
-        "frame {frame_no}: mode={} bytes={} skip={} copy16={} copy16_res={} vbs={} vbs_res={} base_res={} raw_mb={} raw4x4={} dc={} ac={} y_mae_milli={} y_bad16_pm={}",
+        "frame {frame_no}: mode={} bytes={} skip={} copy16={} copy16_res={} vbs={} vbs_res={} base_res={} lazy_base_copy={} raw_mb={} raw4x4={} dc={} ac={} y_mae_milli={} y_bad16_pm={}",
         candidate.mode_name,
         candidate.stats.p_frame_bytes,
         candidate.stats.skip_mb,
@@ -312,6 +314,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         candidate.stats.vbs_mb,
         candidate.stats.vbs_res_mb,
         candidate.stats.base_res_mb,
+        candidate.stats.lazy_base_copy_mb,
         candidate.stats.raw_mb,
         candidate.stats.raw_4x4_blocks,
         candidate.stats.dc_only_blocks,
@@ -342,7 +345,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
   write_output(&options.output, &stream)?;
   eprintln!(
-    "wrote {} bytes, frames={}, key_frames={}, p_bytes={}, skip={} copy16={} copy16_res={} vbs={} vbs_res={} base_res={} raw_mb={} raw4x4={} dc={} ac={} full_idct={} decode_work={}",
+    "wrote {} bytes, frames={}, key_frames={}, p_bytes={}, skip={} copy16={} copy16_res={} vbs={} vbs_res={} base_res={} lazy_base_copy={} raw_mb={} raw4x4={} dc={} ac={} full_idct={} decode_work={}",
     stream.len(),
     frame_count,
     key_frames,
@@ -353,6 +356,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     total.vbs_mb,
     total.vbs_res_mb,
     total.base_res_mb,
+    total.lazy_base_copy_mb,
     total.raw_mb,
     total.raw_4x4_blocks,
     total.dc_only_blocks,
@@ -469,7 +473,7 @@ fn log_p_frame_stats(
     candidate.stats.p_frame_bytes,
   );
   eprintln!(
-    "{{\"kind\":\"o3yv_frame_stats\",\"frame_no\":{},\"frame_type\":\"p\",\"frame_size_bytes\":{},\"rolling_1s_bytes\":{},\"q_step\":{},\"skip_base_mb\":{},\"copy16_mb\":{},\"copy_vbs_mb\":{},\"base_res_mb\":{},\"raw_mb\":{},\"raw_4x4_blocks\":{},\"dc_only_blocks\":{},\"ac_mask_blocks\":{},\"full_idct_blocks\":{},\"segment_map_stream_bytes\":{},\"residual_stream_bytes\":{},\"raw_stream_bytes\":{},\"mode_stream_bytes\":{},\"decode_work_units\":{},\"left_base_mv_x\":{},\"left_base_mv_y\":{},\"right_base_mv_x\":{},\"right_base_mv_y\":{},\"y_sse\":{},\"y_mae_milli\":{},\"y_bad_gt16_per_mille\":{},\"y_bad_gt32_per_mille\":{},\"max_mb_y_sse\":{},\"quality_recovery_used\":{}}}",
+    "{{\"kind\":\"o3yv_frame_stats\",\"frame_no\":{},\"frame_type\":\"p\",\"frame_size_bytes\":{},\"rolling_1s_bytes\":{},\"q_step\":{},\"skip_base_mb\":{},\"copy16_mb\":{},\"copy_vbs_mb\":{},\"base_res_mb\":{},\"prefill_tiles\":{},\"lazy_base_copy_mb\":{},\"raw_mb\":{},\"raw_4x4_blocks\":{},\"dc_only_blocks\":{},\"ac_mask_blocks\":{},\"full_idct_blocks\":{},\"segment_map_stream_bytes\":{},\"residual_stream_bytes\":{},\"raw_stream_bytes\":{},\"mode_stream_bytes\":{},\"decode_work_units\":{},\"left_base_mv_x\":{},\"left_base_mv_y\":{},\"right_base_mv_x\":{},\"right_base_mv_y\":{},\"y_sse\":{},\"y_mae_milli\":{},\"y_bad_gt16_per_mille\":{},\"y_bad_gt32_per_mille\":{},\"max_mb_y_sse\":{},\"quality_recovery_used\":{}}}",
     frame_no,
     candidate.stats.p_frame_bytes,
     rolling_1s_bytes,
@@ -478,6 +482,8 @@ fn log_p_frame_stats(
     candidate.stats.copy16_mb,
     candidate.stats.vbs_mb + candidate.stats.vbs_res_mb,
     candidate.stats.base_res_mb,
+    candidate.stats.prefill_tiles,
+    candidate.stats.lazy_base_copy_mb,
     candidate.stats.raw_mb,
     candidate.stats.raw_4x4_blocks,
     candidate.stats.dc_only_blocks,
@@ -648,9 +654,12 @@ fn estimate_p_decode_work_units(stats: &FrameStats) -> usize {
     + stats.mode_stream_bytes * 2
     + stats.residual_stream_bytes * 2
     + stats.raw_stream_bytes;
-  let prefill_units = 2 * EYE_FRAME_BYTES;
-  let prediction_mb =
-    stats.copy16_mb + stats.copy16_res_mb + stats.vbs_mb + stats.vbs_res_mb;
+  let prefill_units = stats.prefill_tiles * EYE_FRAME_BYTES;
+  let prediction_mb = stats.copy16_mb
+    + stats.copy16_res_mb
+    + stats.vbs_mb
+    + stats.vbs_res_mb
+    + stats.lazy_base_copy_mb;
   let prediction_units = prediction_mb * RAW_MB_BYTES;
   let raw_units = stats.raw_mb * RAW_MB_BYTES + stats.raw_4x4_blocks * 16;
   let residual_mb = stats.base_res_mb + stats.copy16_res_mb + stats.vbs_res_mb;
@@ -974,6 +983,12 @@ fn encode_tile(
   }
   stats.segment_map_stream_bytes =
     fragments.iter().map(|fragment| fragment.segment_map_stream.len()).sum();
+  let base_predictor_mbs = stats.skip_mb + stats.base_res_mb;
+  if base_predictor_mbs <= LAZY_BASE_COPY_MAX_MB_PER_TILE {
+    stats.lazy_base_copy_mb = base_predictor_mbs;
+  } else {
+    stats.prefill_tiles = 1;
+  }
 
   let tile = EncodedTile { tile_id, base_mv, segment_count, fragments };
   (tile, recon, stats)
@@ -2002,6 +2017,8 @@ fn add_stats(total: &mut FrameStats, frame: &FrameStats) {
   total.vbs_mb += frame.vbs_mb;
   total.vbs_res_mb += frame.vbs_res_mb;
   total.base_res_mb += frame.base_res_mb;
+  total.prefill_tiles += frame.prefill_tiles;
+  total.lazy_base_copy_mb += frame.lazy_base_copy_mb;
   total.raw_mb += frame.raw_mb;
   total.raw_4x4_blocks += frame.raw_4x4_blocks;
   total.dc_only_blocks += frame.dc_only_blocks;
