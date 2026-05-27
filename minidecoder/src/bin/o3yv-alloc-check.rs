@@ -1,4 +1,4 @@
-use minidecoder::StreamDecoder;
+use minidecoder::{StreamDecoder, EYE_FRAME_BYTES};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
 use std::fs;
@@ -41,11 +41,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .ok_or_else(|| "usage: o3yv-alloc-check <input.o3yv>".to_string())?;
   let bytes = fs::read(input)?;
   let mut decoder = StreamDecoder::new(&bytes)?;
+  let mut left_y2r = vec![0u8; EYE_FRAME_BYTES];
+  let mut right_y2r = vec![0u8; EYE_FRAME_BYTES];
 
   ALLOCATIONS.store(0, Ordering::Relaxed);
   decoder.reset()?;
   let mut frames = 0usize;
-  while decoder.next_frame()?.is_some() {
+  while let Some(decoded) = decoder.next_frame()? {
+    decoded.frame.left.write_yuv420p_into(&mut left_y2r)?;
+    decoded.frame.right.write_yuv420p_into(&mut right_y2r)?;
     frames += 1;
   }
   let allocations = ALLOCATIONS.load(Ordering::Relaxed);

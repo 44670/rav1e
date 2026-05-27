@@ -77,6 +77,22 @@ impl EyeFrame {
       cr: vec![128; CHROMA_W * CHROMA_H],
     }
   }
+
+  pub fn write_yuv420p_into(&self, out: &mut [u8]) -> Result<()> {
+    if out.len() != EYE_FRAME_BYTES {
+      return Err(Error::Invalid(format!(
+        "expected {EYE_FRAME_BYTES} eye YUV420 bytes, got {}",
+        out.len()
+      )));
+    }
+
+    let y_len = EYE_W * EYE_H;
+    let c_len = CHROMA_W * CHROMA_H;
+    out[..y_len].copy_from_slice(&self.y);
+    out[y_len..y_len + c_len].copy_from_slice(&self.cb);
+    out[y_len + c_len..].copy_from_slice(&self.cr);
+    Ok(())
+  }
 }
 
 impl Default for EyeFrame {
@@ -139,6 +155,20 @@ impl SbsFrame {
 
   pub fn to_yuv420_sbs(&self) -> Vec<u8> {
     let mut out = vec![0; SBS_FRAME_BYTES];
+    self
+      .write_yuv420_sbs_into(&mut out)
+      .expect("internal SBS output size is valid");
+    out
+  }
+
+  pub fn write_yuv420_sbs_into(&self, out: &mut [u8]) -> Result<()> {
+    if out.len() != SBS_FRAME_BYTES {
+      return Err(Error::Invalid(format!(
+        "expected {SBS_FRAME_BYTES} SBS YUV420 bytes, got {}",
+        out.len()
+      )));
+    }
+
     let cb_start = VISIBLE_W * VISIBLE_H;
     let cb_len = (VISIBLE_W / 2) * (VISIBLE_H / 2);
     let cr_start = cb_start + cb_len;
@@ -167,8 +197,7 @@ impl SbsFrame {
       dst_cr[CHROMA_W..]
         .copy_from_slice(&self.right.cr[row * CHROMA_W..(row + 1) * CHROMA_W]);
     }
-
-    out
+    Ok(())
   }
 }
 
@@ -2054,6 +2083,24 @@ mod tests {
     write_file_header(&mut bytes, 1);
     write_key_raw_frame(&mut bytes, 0, &frame);
     assert_eq!(decode_stream(&bytes).unwrap(), vec![frame]);
+  }
+
+  #[test]
+  fn frame_writes_y2r_ready_eye_buffers_without_allocating() {
+    let frame = patterned_frame(11);
+    let mut left = vec![0; EYE_FRAME_BYTES];
+    frame.left.write_yuv420p_into(&mut left).unwrap();
+
+    let y_len = EYE_W * EYE_H;
+    let c_len = CHROMA_W * CHROMA_H;
+    assert_eq!(&left[..y_len], &frame.left.y);
+    assert_eq!(&left[y_len..y_len + c_len], &frame.left.cb);
+    assert_eq!(&left[y_len + c_len..], &frame.left.cr);
+
+    let mut sbs = vec![0; SBS_FRAME_BYTES];
+    frame.write_yuv420_sbs_into(&mut sbs).unwrap();
+    assert_eq!(sbs, frame.to_yuv420_sbs());
+    assert_eq!(SbsFrame::from_yuv420_sbs(&sbs).unwrap(), frame);
   }
 
   #[test]

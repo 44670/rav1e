@@ -74,7 +74,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   if let Some(output) = options.output {
     let mut out = Vec::with_capacity(frames.len() * SBS_FRAME_BYTES);
     for decoded in &frames {
-      out.extend_from_slice(&decoded.frame.to_yuv420_sbs());
+      let start = out.len();
+      out.resize(start + SBS_FRAME_BYTES, 0);
+      decoded.frame.write_yuv420_sbs_into(&mut out[start..])?;
     }
     if output == "-" {
       io::stdout().write_all(&out)?;
