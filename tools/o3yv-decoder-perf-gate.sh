@@ -18,8 +18,8 @@ Defaults:
 
 Default ceilings:
   O3YV_GATE_MAX_P_WORK        1000000 estimated units
-  O3YV_GATE_REP_MEDIAN_MS     0.75 ms/frame
-  O3YV_GATE_WORST_FRAME_MS    1.50 ms
+  O3YV_GATE_REP_MEDIAN_MS     0.60 ms/frame
+  O3YV_GATE_WORST_FRAME_MS    1.20 ms
   O3YV_GATE_STRESS_*_MS       per stress kind, see script
 USAGE
 }
@@ -49,8 +49,8 @@ stress_dir=tmp/decoder-perf-gate
 stress_kinds=(all-skip prefill-shift copy16 raw-mb dc6000 ac6000 raw4x4)
 
 max_p_work=${O3YV_GATE_MAX_P_WORK:-1000000}
-rep_median_ms=${O3YV_GATE_REP_MEDIAN_MS:-0.75}
-worst_frame_ms=${O3YV_GATE_WORST_FRAME_MS:-1.50}
+rep_median_ms=${O3YV_GATE_REP_MEDIAN_MS:-0.60}
+worst_frame_ms=${O3YV_GATE_WORST_FRAME_MS:-1.20}
 
 metric() {
   local key=$1
@@ -81,13 +81,13 @@ check_le() {
 
 stress_limit_ms() {
   case "$1" in
-    all-skip) echo "${O3YV_GATE_STRESS_ALL_SKIP_MS:-0.10}" ;;
-    prefill-shift) echo "${O3YV_GATE_STRESS_PREFILL_SHIFT_MS:-0.20}" ;;
-    copy16) echo "${O3YV_GATE_STRESS_COPY16_MS:-0.40}" ;;
-    raw-mb) echo "${O3YV_GATE_STRESS_RAW_MB_MS:-0.35}" ;;
-    dc6000) echo "${O3YV_GATE_STRESS_DC6000_MS:-0.70}" ;;
-    ac6000) echo "${O3YV_GATE_STRESS_AC6000_MS:-1.70}" ;;
-    raw4x4) echo "${O3YV_GATE_STRESS_RAW4X4_MS:-0.70}" ;;
+    all-skip) echo "${O3YV_GATE_STRESS_ALL_SKIP_MS:-0.03}" ;;
+    prefill-shift) echo "${O3YV_GATE_STRESS_PREFILL_SHIFT_MS:-0.15}" ;;
+    copy16) echo "${O3YV_GATE_STRESS_COPY16_MS:-0.35}" ;;
+    raw-mb) echo "${O3YV_GATE_STRESS_RAW_MB_MS:-0.30}" ;;
+    dc6000) echo "${O3YV_GATE_STRESS_DC6000_MS:-0.55}" ;;
+    ac6000) echo "${O3YV_GATE_STRESS_AC6000_MS:-1.40}" ;;
+    raw4x4) echo "${O3YV_GATE_STRESS_RAW4X4_MS:-0.60}" ;;
     *) echo "unknown stress kind: $1" >&2; exit 1 ;;
   esac
 }
