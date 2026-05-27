@@ -1,9 +1,12 @@
+#[cfg(feature = "png")]
 use image::{Rgb, RgbImage};
 use minidecoder::{
   decode_stream_for_each, decode_stream_for_each_with_state,
-  decode_stream_with_metadata, DecoderState, SbsFrame, CHROMA_W, EYE_H, EYE_W,
-  FRAME_TYPE_KEY_RAW, FRAME_TYPE_P, SBS_FRAME_BYTES, VISIBLE_H, VISIBLE_W,
+  decode_stream_with_metadata, DecoderState, FRAME_TYPE_KEY_RAW, FRAME_TYPE_P,
+  SBS_FRAME_BYTES,
 };
+#[cfg(feature = "png")]
+use minidecoder::{SbsFrame, CHROMA_W, EYE_H, EYE_W, VISIBLE_H, VISIBLE_W};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -53,6 +56,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     return Ok(());
   }
 
+  #[cfg(not(feature = "png"))]
+  if options.png_dir.is_some() {
+    return Err(
+      "--png-dir requires building minidecoder with --features png".into(),
+    );
+  }
+
   if options.output.is_none() && options.png_dir.is_none() {
     let frame_count = decode_stream_for_each(&bytes, |_| {})?;
     eprintln!("decoded {frame_count} frame(s)");
@@ -74,10 +84,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
   }
 
+  #[cfg(feature = "png")]
   if let Some(png_dir) = options.png_dir {
     fs::create_dir_all(&png_dir)?;
     for (index, decoded) in frames.iter().enumerate() {
-      let kind = png_frame_kind(decoded.frame_type)?;
+      let kind = frame_type_label(decoded.frame_type)?;
       let path = png_dir.join(format!("f_{index:05}_{kind}.png"));
       frame_to_rgb(&decoded.frame).save(&path)?;
       eprintln!("wrote {}", path.display());
@@ -162,8 +173,9 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
 
 fn print_usage() {
   let stats = if cfg!(feature = "stats") { " [--stats]" } else { "" };
+  let png = if cfg!(feature = "png") { " [--png-dir DIR]" } else { "" };
   eprintln!(
-    "usage: minidecoder <input.o3yv> [output.yuv] [--png-dir DIR] [--bench N] [--bench-frames N]{stats}"
+    "usage: minidecoder <input.o3yv> [output.yuv]{png} [--bench N] [--bench-frames N]{stats}"
   );
 }
 
@@ -297,7 +309,7 @@ fn run_frame_bench(
       "frame index={} no={} type={} mean={:.3} min={:.3} median={:.3} p95={:.3} max={:.3}",
       summary.index,
       summary.frame_no,
-      png_frame_kind(summary.frame_type)?,
+      frame_type_label(summary.frame_type)?,
       ms(summary.mean),
       ms(summary.min),
       ms(summary.median),
@@ -1138,7 +1150,7 @@ impl<'a> StatsReader<'a> {
   }
 }
 
-fn png_frame_kind(
+fn frame_type_label(
   frame_type: u8,
 ) -> Result<&'static str, Box<dyn std::error::Error>> {
   match frame_type {
@@ -1148,6 +1160,7 @@ fn png_frame_kind(
   }
 }
 
+#[cfg(feature = "png")]
 fn frame_to_rgb(frame: &SbsFrame) -> RgbImage {
   let mut image = RgbImage::new(VISIBLE_W as u32, VISIBLE_H as u32);
   draw_eye(&mut image, 0, &frame.left);
@@ -1155,6 +1168,7 @@ fn frame_to_rgb(frame: &SbsFrame) -> RgbImage {
   image
 }
 
+#[cfg(feature = "png")]
 fn draw_eye(
   image: &mut RgbImage, x_offset: usize, eye: &minidecoder::EyeFrame,
 ) {
@@ -1172,6 +1186,7 @@ fn draw_eye(
   }
 }
 
+#[cfg(feature = "png")]
 fn yuv_to_rgb(y: u8, cb: u8, cr: u8) -> Rgb<u8> {
   let y = (y as i32 - 16).max(0);
   let cb = cb as i32 - 128;
@@ -1186,6 +1201,7 @@ fn yuv_to_rgb(y: u8, cb: u8, cr: u8) -> Rgb<u8> {
   Rgb([clip_u8(r), clip_u8(g), clip_u8(b)])
 }
 
+#[cfg(feature = "png")]
 fn clip_u8(value: i32) -> u8 {
   value.clamp(0, 255) as u8
 }

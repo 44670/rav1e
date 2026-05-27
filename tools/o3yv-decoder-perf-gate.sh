@@ -105,7 +105,7 @@ ensure_rust_target() {
 }
 
 echo "== native stats =="
-cargo build --release -p minidecoder --features stats
+cargo build --release -p minidecoder --no-default-features --features stats
 stats_output=$(target/release/minidecoder "$input" --stats 2>&1)
 echo "$stats_output"
 p_max=$(printf '%s\n' "$stats_output" | metric p_max)
@@ -114,7 +114,7 @@ check_le "estimated max P work" "$p_max" "$max_p_work"
 echo
 echo "== arm qemu representative stream =="
 ensure_rust_target
-cargo build --release -p minidecoder --target "$arm_target"
+cargo build --release -p minidecoder --no-default-features --target "$arm_target"
 bench_output=$(
   qemu-arm -cpu arm11mpcore "$arm_decoder" "$input" --bench "$bench_iters" 2>&1
 )
@@ -135,7 +135,7 @@ check_le "worst-frame median ms" "$worst_median" "$worst_frame_ms"
 
 echo
 echo "== arm qemu stress streams =="
-cargo build --release -p minidecoder --features stress
+cargo build --release -p minidecoder --no-default-features --features stress
 mkdir -p "$stress_dir"
 for kind in "${stress_kinds[@]}"; do
   stream="$stress_dir/${kind}.o3yv"

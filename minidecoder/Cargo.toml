@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+default = []
+png = ["dep:image"]
 stats = []
 stress = []
 
@@ -21,4 +23,4 @@ path = "src/bin/o3yv-stress.rs"
 required-features = ["stress"]
 
 [dependencies]
-image = { version = "0.25.0", default-features = false, features = ["png"] }
+image = { version = "0.25.0", default-features = false, features = ["png"], optional = true }
