@@ -385,76 +385,110 @@ where
   state.reset();
   let mut frame_count = 0usize;
 
-  while r.remaining() > 0 {
-    let frame_start = r.pos;
-    let start_code = r.u32()?;
-    if start_code != FRAME_MAGIC {
-      return Err(Error::Invalid("bad frame start code".into()));
-    }
-    let frame_size = r.u32()? as usize;
-    let frame_no = r.u32()?;
-    let _pts_ticks = r.u32()?;
-    let frame_type = r.u8()?;
-    let tile_count = r.u8()?;
-    let flags = r.u8()?;
-    let reserved = r.u8()?;
-    let _crc = r.u32()?;
-    let _cost = r.u32()?;
+  while let Some(decoded) = decode_next_frame(&mut r, state)? {
+    on_frame(decoded);
+    frame_count += 1;
+  }
 
-    if flags != 0 || reserved != 0 {
-      return Err(Error::Invalid(format!(
-        "reserved frame bits set at frame {frame_no}"
-      )));
-    }
-    let payload_start = frame_start + FRAME_HEADER_SIZE;
-    let payload_end = payload_start
-      .checked_add(frame_size)
-      .ok_or_else(|| Error::Invalid("frame size overflow".into()))?;
-    if payload_end > bytes.len() {
-      return Err(Error::Eof);
-    }
+  Ok(frame_count)
+}
 
-    match frame_type {
-      FRAME_TYPE_KEY_RAW => {
-        if tile_count != 2 {
-          return Err(Error::Invalid("KEY_RAW tile_count must be 2".into()));
-        }
-        if frame_size != SBS_FRAME_BYTES {
-          return Err(Error::Invalid(format!(
-            "KEY_RAW payload must be {SBS_FRAME_BYTES} bytes, got {frame_size}"
-          )));
-        }
-        read_eye_raw_into(
-          &mut state.current.left,
-          &bytes[payload_start..payload_start + EYE_FRAME_BYTES],
-        )?;
-        read_eye_raw_into(
-          &mut state.current.right,
-          &bytes[payload_start + EYE_FRAME_BYTES..payload_end],
-        )?;
+pub struct StreamDecoder<'a> {
+  r: Reader<'a>,
+  state: DecoderState,
+}
+
+impl<'a> StreamDecoder<'a> {
+  pub fn new(bytes: &'a [u8]) -> Result<Self> {
+    let mut r = Reader::new(bytes);
+    parse_file_header(&mut r)?;
+    Ok(Self { r, state: DecoderState::new() })
+  }
+
+  pub fn next_frame(&mut self) -> Result<Option<DecodedFrameRef<'_>>> {
+    decode_next_frame(&mut self.r, &mut self.state)
+  }
+}
+
+fn decode_next_frame<'state>(
+  r: &mut Reader<'_>, state: &'state mut DecoderState,
+) -> Result<Option<DecodedFrameRef<'state>>> {
+  if r.remaining() == 0 {
+    return Ok(None);
+  }
+
+  let frame_start = r.pos;
+  let start_code = r.u32()?;
+  if start_code != FRAME_MAGIC {
+    return Err(Error::Invalid("bad frame start code".into()));
+  }
+  let frame_size = r.u32()? as usize;
+  let frame_no = r.u32()?;
+  let _pts_ticks = r.u32()?;
+  let frame_type = r.u8()?;
+  let tile_count = r.u8()?;
+  let flags = r.u8()?;
+  let reserved = r.u8()?;
+  let _crc = r.u32()?;
+  let _cost = r.u32()?;
+
+  if flags != 0 || reserved != 0 {
+    return Err(Error::Invalid(format!(
+      "reserved frame bits set at frame {frame_no}"
+    )));
+  }
+  let payload_start = frame_start + FRAME_HEADER_SIZE;
+  let payload_end = payload_start
+    .checked_add(frame_size)
+    .ok_or_else(|| Error::Invalid("frame size overflow".into()))?;
+  if payload_end > r.bytes.len() {
+    return Err(Error::Eof);
+  }
+
+  match frame_type {
+    FRAME_TYPE_KEY_RAW => {
+      if tile_count != 2 {
+        return Err(Error::Invalid("KEY_RAW tile_count must be 2".into()));
       }
-      FRAME_TYPE_P => {
-        if tile_count != 2 {
-          return Err(Error::Invalid("P-frame tile_count must be 2".into()));
-        }
-        if !state.has_reference {
-          return Err(Error::Invalid(
-            "P-frame cannot appear before a reference frame".into(),
-          ));
-        }
+      if frame_size != SBS_FRAME_BYTES {
+        return Err(Error::Invalid(format!(
+          "KEY_RAW payload must be {SBS_FRAME_BYTES} bytes, got {frame_size}"
+        )));
+      }
+      read_eye_raw_into(
+        &mut state.current.left,
+        &r.bytes[payload_start..payload_start + EYE_FRAME_BYTES],
+      )?;
+      read_eye_raw_into(
+        &mut state.current.right,
+        &r.bytes[payload_start + EYE_FRAME_BYTES..payload_end],
+      )?;
+    }
+    FRAME_TYPE_P => {
+      if tile_count != 2 {
+        return Err(Error::Invalid("P-frame tile_count must be 2".into()));
+      }
+      if !state.has_reference {
+        return Err(Error::Invalid(
+          "P-frame cannot appear before a reference frame".into(),
+        ));
+      }
+      if frame_size <= REFERENCE_REUSE_FRAME_PAYLOAD_MAX
+        && p_payload_reuses_reference(
+          &r.bytes[payload_start..payload_end],
+          tile_count,
+        )
+      {
+        r.pos = payload_end;
+        return Ok(Some(DecodedFrameRef {
+          frame_no,
+          frame_type,
+          frame: &state.reference,
+        }));
+      }
+      {
         let reference = &state.reference;
-        if frame_size <= REFERENCE_REUSE_FRAME_PAYLOAD_MAX
-          && p_payload_reuses_reference(
-            &bytes[payload_start..payload_end],
-            tile_count,
-          )
-        {
-          r.pos = payload_end;
-          on_frame(DecodedFrameRef { frame_no, frame_type, frame: reference });
-          frame_count += 1;
-          continue;
-        }
-        let mut pr = Reader::new(&bytes[payload_start..payload_end]);
+        let mut pr = Reader::new(&r.bytes[payload_start..payload_end]);
         for _ in 0..2 {
           decode_tile(&mut pr, reference, &mut state.current)?;
         }
@@ -462,17 +496,14 @@ where
           return Err(Error::Invalid("unconsumed P-frame payload".into()));
         }
       }
-      _ => return Err(Error::Unsupported(format!("frame type {frame_type}"))),
-    };
+    }
+    _ => return Err(Error::Unsupported(format!("frame type {frame_type}"))),
+  };
 
-    r.pos = payload_end;
-    on_frame(DecodedFrameRef { frame_no, frame_type, frame: &state.current });
-    core::mem::swap(&mut state.reference, &mut state.current);
-    state.has_reference = true;
-    frame_count += 1;
-  }
-
-  Ok(frame_count)
+  r.pos = payload_end;
+  core::mem::swap(&mut state.reference, &mut state.current);
+  state.has_reference = true;
+  Ok(Some(DecodedFrameRef { frame_no, frame_type, frame: &state.reference }))
 }
 
 fn write_frame_header(
@@ -2216,6 +2247,24 @@ mod tests {
     assert_eq!(frames[0].frame_type, FRAME_TYPE_KEY_RAW);
     assert_eq!(frames[1].frame_no, 1);
     assert_eq!(frames[1].frame_type, FRAME_TYPE_P);
+  }
+
+  #[test]
+  fn stream_decoder_decodes_one_frame_at_a_time() {
+    let bytes = p_with_tiles(vec![0x7f, 0x7f, 0x79, 0], vec![], vec![]);
+    let mut decoder = StreamDecoder::new(&bytes).unwrap();
+
+    let first = decoder.next_frame().unwrap().unwrap();
+    assert_eq!(first.frame_no, 0);
+    assert_eq!(first.frame_type, FRAME_TYPE_KEY_RAW);
+    let key = first.frame.clone();
+
+    let second = decoder.next_frame().unwrap().unwrap();
+    assert_eq!(second.frame_no, 1);
+    assert_eq!(second.frame_type, FRAME_TYPE_P);
+    assert_eq!(*second.frame, key);
+
+    assert!(decoder.next_frame().unwrap().is_none());
   }
 
   #[test]

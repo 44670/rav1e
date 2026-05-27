@@ -1,4 +1,4 @@
-use minidecoder::{decode_stream_for_each_with_state, DecoderState};
+use minidecoder::StreamDecoder;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
 use std::fs;
@@ -40,10 +40,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .nth(1)
     .ok_or_else(|| "usage: o3yv-alloc-check <input.o3yv>".to_string())?;
   let bytes = fs::read(input)?;
-  let mut state = DecoderState::new();
+  let mut decoder = StreamDecoder::new(&bytes)?;
 
   ALLOCATIONS.store(0, Ordering::Relaxed);
-  let frames = decode_stream_for_each_with_state(&bytes, &mut state, |_| {})?;
+  let mut frames = 0usize;
+  while decoder.next_frame()?.is_some() {
+    frames += 1;
+  }
   let allocations = ALLOCATIONS.load(Ordering::Relaxed);
   if allocations != 0 {
     return Err(
