@@ -711,6 +711,7 @@ fn validate_segment_map(
   Ok(())
 }
 
+#[inline(always)]
 fn decode_one_mb(
   mode: u8, mb_index: usize, mode_stream: &mut Reader<'_>,
   residual: &mut Reader<'_>, raw: &mut Reader<'_>, reference: &EyeFrame,
@@ -813,10 +814,12 @@ fn decode_one_mb(
   }
 }
 
+#[inline(always)]
 fn read_mv(r: &mut Reader<'_>) -> Result<Mv> {
   Ok(Mv { x: r.i8()?, y: r.i8()? })
 }
 
+#[inline(always)]
 fn apply_mb_residual(
   current: &mut EyeFrame, mb_index: usize, residual: &mut Reader<'_>,
 ) -> Result<()> {
@@ -854,6 +857,7 @@ fn apply_mb_residual(
   Ok(())
 }
 
+#[inline(always)]
 fn apply_block(
   plane: &mut [u8], stride: usize, x: usize, y: usize,
   residual: &mut Reader<'_>,
@@ -922,6 +926,7 @@ fn apply_block(
   Ok(())
 }
 
+#[inline(always)]
 fn add_dc_block(
   plane: &mut [u8], stride: usize, x: usize, y: usize, coeff: i32,
 ) {
@@ -939,6 +944,7 @@ fn add_dc_block(
   }
 }
 
+#[inline(always)]
 fn add_idct_block(
   plane: &mut [u8], stride: usize, x: usize, y: usize, coeffs: [i32; 16],
 ) {
