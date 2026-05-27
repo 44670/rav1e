@@ -77,7 +77,7 @@ const P_FRAME_SOFT_TARGET_MIN: usize = 60 * 1024;
 const MAX_RAW_MB_PER_P_FRAME: usize = 96;
 const MAX_AC_MASK_BLOCKS_PER_P_FRAME: usize = 3_650;
 const MAX_FULL_IDCT_BLOCKS_PER_P_FRAME: usize = 256;
-const MAX_P_DECODE_WORK_UNITS: usize = 2_200_000;
+const MAX_P_DECODE_WORK_UNITS: usize = 1_000_000;
 const BUDGET_Q_STEPS: [i16; 8] = [4, 8, 12, 16, 24, 32, 48, 64];
 const QUALITY_RECOVERY_Q_STEP: i16 = 1;
 const QUALITY_RECOVERY_RAW4X4_SSE_THRESHOLDS: [usize; 7] =
@@ -2127,6 +2127,19 @@ mod tests {
 
     assert!(p_frame_satisfies_budget(&stats, 64 * 1024));
     stats.full_idct_blocks += 1;
+    assert!(!p_frame_satisfies_budget(&stats, 64 * 1024));
+  }
+
+  #[test]
+  fn p_frame_budget_check_enforces_decode_work_cap() {
+    let mut stats = FrameStats {
+      p_frame_bytes: 1,
+      decode_work_units: MAX_P_DECODE_WORK_UNITS,
+      ..Default::default()
+    };
+
+    assert!(p_frame_satisfies_budget(&stats, 64 * 1024));
+    stats.decode_work_units += 1;
     assert!(!p_frame_satisfies_budget(&stats, 64 * 1024));
   }
 
