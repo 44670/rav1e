@@ -1182,10 +1182,30 @@ fn motion_copy_plane(
   }
 
   for y in 0..h {
-    for x in 0..w {
-      let sx = clamp_i32(x as i32 + mv_x, 0, w as i32 - 1) as usize;
-      let sy = clamp_i32(y as i32 + mv_y, 0, h as i32 - 1) as usize;
-      dst[y * w + x] = src[sy * w + sx];
+    let sy = clamp_i32(y as i32 + mv_y, 0, h as i32 - 1) as usize;
+    let dst_row = &mut dst[y * w..(y + 1) * w];
+    let src_row = &src[sy * w..(sy + 1) * w];
+    copy_shifted_row(dst_row, src_row, mv_x);
+  }
+}
+
+fn copy_shifted_row(dst: &mut [u8], src: &[u8], mv_x: i32) {
+  debug_assert_eq!(dst.len(), src.len());
+  let w = dst.len();
+  if mv_x == 0 {
+    dst.copy_from_slice(src);
+  } else if mv_x > 0 {
+    let shift = (mv_x as usize).min(w);
+    let copy_len = w - shift;
+    if copy_len > 0 {
+      dst[..copy_len].copy_from_slice(&src[shift..]);
+    }
+    dst[copy_len..].fill(src[w - 1]);
+  } else {
+    let shift = ((-mv_x) as usize).min(w);
+    dst[..shift].fill(src[0]);
+    if shift < w {
+      dst[shift..].copy_from_slice(&src[..w - shift]);
     }
   }
 }
@@ -1211,11 +1231,25 @@ fn copy_rect(
   {
     let src_x = src_x as usize;
     let src_y = src_y as usize;
-    for row in 0..bh {
-      let dst_off = (dst_y + row) * w + dst_x;
-      let src_off = (src_y + row) * w + src_x;
-      for col in 0..bw {
-        dst[dst_off + col] = src[src_off + col];
+    if bw == 16 {
+      for row in 0..bh {
+        let dst_off = (dst_y + row) * w + dst_x;
+        let src_off = (src_y + row) * w + src_x;
+        copy_16(&mut dst[dst_off..dst_off + 16], &src[src_off..src_off + 16]);
+      }
+    } else if bw == 8 {
+      for row in 0..bh {
+        let dst_off = (dst_y + row) * w + dst_x;
+        let src_off = (src_y + row) * w + src_x;
+        copy_8(&mut dst[dst_off..dst_off + 8], &src[src_off..src_off + 8]);
+      }
+    } else {
+      for row in 0..bh {
+        let dst_off = (dst_y + row) * w + dst_x;
+        let src_off = (src_y + row) * w + src_x;
+        for col in 0..bw {
+          dst[dst_off + col] = src[src_off + col];
+        }
       }
     }
     return;
@@ -1230,6 +1264,36 @@ fn copy_rect(
       dst[y * w + x] = src[sy * w + sx];
     }
   }
+}
+
+fn copy_8(dst: &mut [u8], src: &[u8]) {
+  dst[0] = src[0];
+  dst[1] = src[1];
+  dst[2] = src[2];
+  dst[3] = src[3];
+  dst[4] = src[4];
+  dst[5] = src[5];
+  dst[6] = src[6];
+  dst[7] = src[7];
+}
+
+fn copy_16(dst: &mut [u8], src: &[u8]) {
+  dst[0] = src[0];
+  dst[1] = src[1];
+  dst[2] = src[2];
+  dst[3] = src[3];
+  dst[4] = src[4];
+  dst[5] = src[5];
+  dst[6] = src[6];
+  dst[7] = src[7];
+  dst[8] = src[8];
+  dst[9] = src[9];
+  dst[10] = src[10];
+  dst[11] = src[11];
+  dst[12] = src[12];
+  dst[13] = src[13];
+  dst[14] = src[14];
+  dst[15] = src[15];
 }
 
 fn write_raw_mb(current: &mut EyeFrame, mb_index: usize, bytes: &[u8]) {
