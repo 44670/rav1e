@@ -954,10 +954,8 @@ fn add_dc_row4(plane: &mut [u8], idx: usize, delta: i32) {
 fn add_idct_block(
   plane: &mut [u8], stride: usize, x: usize, y: usize, coeffs: [i32; 16],
 ) {
-  let (t0, t4, t8, t12) =
-    idct_1d(coeffs[0], coeffs[4], coeffs[8], coeffs[12]);
-  let (t1, t5, t9, t13) =
-    idct_1d(coeffs[1], coeffs[5], coeffs[9], coeffs[13]);
+  let (t0, t4, t8, t12) = idct_1d(coeffs[0], coeffs[4], coeffs[8], coeffs[12]);
+  let (t1, t5, t9, t13) = idct_1d(coeffs[1], coeffs[5], coeffs[9], coeffs[13]);
   let (t2, t6, t10, t14) =
     idct_1d(coeffs[2], coeffs[6], coeffs[10], coeffs[14]);
   let (t3, t7, t11, t15) =

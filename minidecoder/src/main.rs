@@ -363,10 +363,12 @@ struct StreamStats {
   full_idct_blocks: usize,
   raw_4x4_blocks: usize,
   p_work_units: usize,
+  p_work_breakdown: WorkUnits,
   max_p_work_units: usize,
   max_p_work_frame_no: u32,
   max_p_work_frame_payload_bytes: usize,
   max_p_work: FrameWorkload,
+  max_p_work_breakdown: WorkUnits,
   max_p_segment_map_bytes: usize,
   max_p_mode_bytes: usize,
   max_p_residual_bytes: usize,
@@ -398,6 +400,38 @@ struct FrameWorkload {
   dc_only_blocks: usize,
   full_idct_blocks: usize,
   raw_4x4_blocks: usize,
+}
+
+#[cfg(feature = "stats")]
+#[derive(Clone, Copy, Default)]
+struct WorkUnits {
+  parse: usize,
+  prefill: usize,
+  prediction: usize,
+  raw_copy: usize,
+  residual_dc: usize,
+  idct: usize,
+}
+
+#[cfg(feature = "stats")]
+impl WorkUnits {
+  fn total(self) -> usize {
+    self.parse
+      + self.prefill
+      + self.prediction
+      + self.raw_copy
+      + self.residual_dc
+      + self.idct
+  }
+
+  fn add(&mut self, other: WorkUnits) {
+    self.parse += other.parse;
+    self.prefill += other.prefill;
+    self.prediction += other.prediction;
+    self.raw_copy += other.raw_copy;
+    self.residual_dc += other.residual_dc;
+    self.idct += other.idct;
+  }
 }
 
 #[cfg(feature = "stats")]
@@ -476,9 +510,28 @@ fn print_stream_stats(
       stats.max_p_work_units,
       268_000_000usize * 15 / 1000
     );
-    let frame = stats.max_p_work;
+    let p_avg = WorkUnits {
+      parse: stats.p_work_breakdown.parse / stats.p_frames,
+      prefill: stats.p_work_breakdown.prefill / stats.p_frames,
+      prediction: stats.p_work_breakdown.prediction / stats.p_frames,
+      raw_copy: stats.p_work_breakdown.raw_copy / stats.p_frames,
+      residual_dc: stats.p_work_breakdown.residual_dc / stats.p_frames,
+      idct: stats.p_work_breakdown.idct / stats.p_frames,
+    };
     eprintln!(
-      "stats max_p_work frame_no={} payload_bytes={} work={} segment_map={} mode={} residual={} raw={} skip={} copy16={} copy_vbs={} raw_mb={} residual_mb={} dc_only={} full_idct={} raw_4x4={}",
+      "stats estimated_work_avg_breakdown parse={} prefill={} prediction={} raw_copy={} residual_dc={} idct={} total={}",
+      p_avg.parse,
+      p_avg.prefill,
+      p_avg.prediction,
+      p_avg.raw_copy,
+      p_avg.residual_dc,
+      p_avg.idct,
+      p_avg.total()
+    );
+    let frame = stats.max_p_work;
+    let max_work = stats.max_p_work_breakdown;
+    eprintln!(
+      "stats max_p_work frame_no={} payload_bytes={} work={} segment_map={} mode={} residual={} raw={} skip={} copy16={} copy_vbs={} raw_mb={} residual_mb={} dc_only={} full_idct={} raw_4x4={} parse={} prefill={} prediction={} raw_copy={} residual_dc={} idct={}",
       stats.max_p_work_frame_no,
       stats.max_p_work_frame_payload_bytes,
       stats.max_p_work_units,
@@ -493,7 +546,13 @@ fn print_stream_stats(
       frame.residual_mb,
       frame.dc_only_blocks,
       frame.full_idct_blocks,
-      frame.raw_4x4_blocks
+      frame.raw_4x4_blocks,
+      max_work.parse,
+      max_work.prefill,
+      max_work.prediction,
+      max_work.raw_copy,
+      max_work.residual_dc,
+      max_work.idct
     );
     eprintln!(
       "stats max_p_block_frames full_idct_frame_no={} raw_4x4_frame_no={}",
@@ -542,12 +601,14 @@ impl StreamStats {
       raw_4x4_blocks: after.raw_4x4_blocks - before.raw_4x4_blocks,
     };
     let work_units = estimate_p_work_units(&frame, tile_count);
-    self.p_work_units += work_units;
-    if work_units > self.max_p_work_units {
-      self.max_p_work_units = work_units;
+    self.p_work_units += work_units.total();
+    self.p_work_breakdown.add(work_units);
+    if work_units.total() > self.max_p_work_units {
+      self.max_p_work_units = work_units.total();
       self.max_p_work_frame_no = frame_no;
       self.max_p_work_frame_payload_bytes = frame_payload_bytes;
       self.max_p_work = frame;
+      self.max_p_work_breakdown = work_units;
     }
     self.max_p_segment_map_bytes =
       self.max_p_segment_map_bytes.max(frame.segment_map_bytes);
@@ -574,24 +635,21 @@ impl StreamStats {
 }
 
 #[cfg(feature = "stats")]
-fn estimate_p_work_units(frame: &FrameWorkload, tile_count: usize) -> usize {
-  let stream_parse_units = frame.segment_map_bytes
+fn estimate_p_work_units(
+  frame: &FrameWorkload, tile_count: usize,
+) -> WorkUnits {
+  let parse = frame.segment_map_bytes
     + frame.mode_bytes * 2
     + frame.residual_bytes * 2
     + frame.raw_bytes;
-  let prefill_units = tile_count * minidecoder::EYE_FRAME_BYTES;
-  let prediction_units =
+  let prefill = tile_count * minidecoder::EYE_FRAME_BYTES;
+  let prediction =
     (frame.copy16_mb + frame.copy_vbs_mb) * minidecoder::RAW_MB_BYTES;
-  let raw_units =
+  let raw_copy =
     frame.raw_mb * minidecoder::RAW_MB_BYTES + frame.raw_4x4_blocks * 16;
-  let residual_units = frame.residual_mb * 8
-    + frame.dc_only_blocks * 64
-    + frame.full_idct_blocks * 512;
-  stream_parse_units
-    + prefill_units
-    + prediction_units
-    + raw_units
-    + residual_units
+  let residual_dc = frame.residual_mb * 8 + frame.dc_only_blocks * 64;
+  let idct = frame.full_idct_blocks * 512;
+  WorkUnits { parse, prefill, prediction, raw_copy, residual_dc, idct }
 }
 
 #[cfg(feature = "stats")]
