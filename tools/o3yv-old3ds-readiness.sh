@@ -5,9 +5,10 @@ usage() {
   cat <<'USAGE'
 usage: tools/o3yv-old3ds-readiness.sh [representative.o3yv]
 
-Checks whether this machine has enough Old3DS homebrew tooling installed to
-build and run a real hardware decoder timing harness. This does not replace
-hardware timing; it makes missing prerequisites explicit.
+Checks whether the decoder core still builds without Rust std and whether this
+machine has enough Old3DS homebrew tooling installed to build and run a real
+hardware decoder timing harness. This does not replace hardware timing; it
+makes missing prerequisites explicit.
 
 Defaults:
   representative.o3yv   tmp/reencode_lazy128_current.o3yv
@@ -54,7 +55,23 @@ check_command() {
   fi
 }
 
+check_minidecoder_nostd() {
+  local log=/tmp/o3yv-minidecoder-nostd-check.log
+  if cargo check -p minidecoder --lib --no-default-features \
+    >"$log" 2>&1; then
+    echo "PASS minidecoder no_std+alloc lib build"
+  else
+    echo "MISS minidecoder no_std+alloc lib build; see $log" >&2
+    cat "$log" >&2
+    missing=1
+  fi
+}
+
 check_file "representative stream" "$input"
+check_command cargo
+if command -v cargo >/dev/null 2>&1; then
+  check_minidecoder_nostd
+fi
 check_command arm-none-eabi-gcc
 check_command makerom
 check_command 3dsxtool

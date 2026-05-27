@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
-png = ["dep:image"]
-stats = []
-stress = []
+default = ["std"]
+png = ["std", "dep:image"]
+stats = ["std"]
+std = []
+stress = ["std"]
 
 [lib]
 name = "minidecoder"

@@ -1,4 +1,15 @@
-use std::fmt;
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+#[cfg(test)]
+extern crate std;
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt;
 
 pub const VISIBLE_W: usize = 800;
 pub const VISIBLE_H: usize = 240;
@@ -235,9 +246,10 @@ impl fmt::Display for Error {
   }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for Error {}
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, Error>;
 
 #[derive(Debug, Clone)]
 pub struct EncodedFragment {
@@ -455,7 +467,7 @@ where
 
     r.pos = payload_end;
     on_frame(DecodedFrameRef { frame_no, frame_type, frame: &state.current });
-    std::mem::swap(&mut state.reference, &mut state.current);
+    core::mem::swap(&mut state.reference, &mut state.current);
     state.has_reference = true;
     frame_count += 1;
   }
