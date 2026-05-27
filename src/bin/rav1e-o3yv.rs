@@ -97,6 +97,8 @@ const QUALITY_AC_MIN_SSE_GAIN: usize = 96;
 const QUALITY_RAW_4X4_LOCAL_COST: usize = 21;
 const QUALITY_AC_DECODE_COST_BIAS: usize = 9;
 const QUALITY_AC_DISTORTION_COST_DIVISOR: usize = 16;
+const QUALITY_RAW_MB_RAW4X4_BLOCK_THRESHOLD: usize = 18;
+const QUALITY_RAW_MB_HARD_MARGIN: usize = 192;
 const SCENE_CUT_AVG_Y_DELTA: u32 = 32;
 const SCENE_CUT_HIGH_Y_DELTA: u8 = 48;
 const SCENE_CUT_HIGH_Y_PERCENT: u32 = 25;
@@ -1068,10 +1070,35 @@ fn choose_mb(
     }
   }
 
+  if mode.quality_recovery() {
+    if let Some(choice) = choose_quality_recovery_raw_mb(&candidates) {
+      return choice;
+    }
+  }
+
   candidates
     .into_iter()
     .min_by_key(|choice| choice.cost)
     .expect("at least one residual or raw candidate exists")
+}
+
+fn choose_quality_recovery_raw_mb(
+  candidates: &[MbChoice],
+) -> Option<MbChoice> {
+  let raw = candidates.iter().find(|choice| choice.mode == MODE_RAW_MB)?;
+  let best = candidates.iter().min_by_key(|choice| choice.cost)?;
+  if best.mode == MODE_RAW_MB {
+    return Some(raw.clone());
+  }
+  if best.residual_stats.raw_4x4_blocks < QUALITY_RAW_MB_RAW4X4_BLOCK_THRESHOLD
+  {
+    return None;
+  }
+  if raw.cost <= best.cost + QUALITY_RAW_MB_HARD_MARGIN {
+    Some(raw.clone())
+  } else {
+    None
+  }
 }
 
 fn add_residual_candidates(
