@@ -34,8 +34,21 @@ struct FrameStats {
   p_frame_bytes: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SceneChangeMetrics {
+  avg_y_delta: u32,
+  high_y_delta_percent: u32,
+}
+
+const FRAME_HEADER_BYTES: usize = 28;
+const KEY_RAW_CODED_BYTES: usize = FRAME_HEADER_BYTES + SBS_FRAME_BYTES;
+const RATE_WINDOW_FRAMES: usize = 24;
+const RATE_WINDOW_BYTES: usize = 2_000_000;
 const MAX_RAW_MB_PER_P_FRAME: usize = 96;
 const BUDGET_Q_STEPS: [i16; 8] = [4, 8, 12, 16, 24, 32, 48, 64];
+const SCENE_CUT_AVG_Y_DELTA: u32 = 32;
+const SCENE_CUT_HIGH_Y_DELTA: u8 = 48;
+const SCENE_CUT_HIGH_Y_PERCENT: u32 = 25;
 
 impl FrameStats {
   fn add_choice(&mut self, choice: &MbChoice) {
@@ -110,18 +123,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   write_file_header(&mut stream, frame_count as u32);
 
   let mut reference: Option<SbsFrame> = None;
+  let mut previous_source: Option<SbsFrame> = None;
+  let mut recent_frame_bytes = Vec::new();
   let mut total = FrameStats::default();
+  let mut key_frames = 0usize;
 
   for frame_no in 0..frame_count {
     let start = frame_no * SBS_FRAME_BYTES;
     let frame =
       SbsFrame::from_yuv420_sbs(&input[start..start + SBS_FRAME_BYTES])?;
-    let is_key = frame_no == 0 || frame_no % options.keyint == 0;
+    let periodic_key = frame_no == 0 || frame_no % options.keyint == 0;
+    let scene_metrics = previous_source
+      .as_ref()
+      .map(|previous| source_scene_change_metrics(&frame, previous));
+    let scene_cut = !periodic_key
+      && scene_metrics.is_some_and(scene_change_requires_keyframe);
+    let scene_key_allowed =
+      rolling_window_allows_keyframe(&recent_frame_bytes);
+    let is_key = periodic_key || (scene_cut && scene_key_allowed);
 
+    let frame_start = stream.len();
     let recon = if is_key {
       write_key_raw_frame(&mut stream, frame_no as u32, &frame);
-      frame
+      key_frames += 1;
+      match (frame_no, periodic_key, scene_metrics) {
+        (0, _, _) => eprintln!(
+          "frame {frame_no}: mode=key-raw bytes={}",
+          stream.len() - frame_start
+        ),
+        (_, true, _) => eprintln!(
+          "frame {frame_no}: mode=key-raw reason=keyint bytes={}",
+          stream.len() - frame_start
+        ),
+        (_, false, Some(metrics)) => eprintln!(
+          "frame {frame_no}: mode=key-raw reason=scene-cut bytes={} avg_y_delta={} high_y_delta={}%",
+          stream.len() - frame_start,
+          metrics.avg_y_delta,
+          metrics.high_y_delta_percent
+        ),
+        _ => unreachable!("scene-cut keyframe requires metrics"),
+      }
+      frame.clone()
     } else {
+      if scene_cut {
+        if let Some(metrics) = scene_metrics {
+          eprintln!(
+            "frame {frame_no}: scene-cut deferred by rolling budget avg_y_delta={} high_y_delta={}%",
+            metrics.avg_y_delta, metrics.high_y_delta_percent
+          );
+        }
+      }
       let reference_frame =
         reference.as_ref().ok_or("missing reference frame")?;
       let candidate = encode_budgeted_p_frame(
@@ -148,6 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       stream.extend_from_slice(&candidate.bytes);
       candidate.recon
     };
+    recent_frame_bytes.push(stream.len() - frame_start);
 
     if options.loopback {
       let decoded = decode_stream(&stream)?;
@@ -161,13 +213,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     reference = Some(recon);
+    previous_source = Some(frame);
   }
 
   write_output(&options.output, &stream)?;
   eprintln!(
-    "wrote {} bytes, frames={}, p_bytes={}, skip={} copy16={} copy16_res={} vbs={} vbs_res={} base_res={} raw_mb={}",
+    "wrote {} bytes, frames={}, key_frames={}, p_bytes={}, skip={} copy16={} copy16_res={} vbs={} vbs_res={} base_res={} raw_mb={}",
     stream.len(),
     frame_count,
+    key_frames,
     total.p_frame_bytes,
     total.skip_mb,
     total.copy16_mb,
@@ -324,6 +378,70 @@ fn p_frame_satisfies_budget(
 ) -> bool {
   stats.p_frame_bytes <= max_p_frame_bytes
     && stats.raw_mb <= MAX_RAW_MB_PER_P_FRAME
+}
+
+fn rolling_window_allows_keyframe(recent_frame_bytes: &[usize]) -> bool {
+  let recent_bytes: usize = recent_frame_bytes
+    .iter()
+    .rev()
+    .take(RATE_WINDOW_FRAMES.saturating_sub(1))
+    .sum();
+  recent_bytes + KEY_RAW_CODED_BYTES <= RATE_WINDOW_BYTES
+}
+
+fn scene_change_requires_keyframe(metrics: SceneChangeMetrics) -> bool {
+  metrics.avg_y_delta >= SCENE_CUT_AVG_Y_DELTA
+    && metrics.high_y_delta_percent >= SCENE_CUT_HIGH_Y_PERCENT
+}
+
+fn source_scene_change_metrics(
+  current: &SbsFrame, previous: &SbsFrame,
+) -> SceneChangeMetrics {
+  let mut sad = 0u64;
+  let mut high_delta_samples = 0u64;
+  let mut samples = 0u64;
+
+  accumulate_scene_eye_metrics(
+    &current.left,
+    &previous.left,
+    find_base_mv(&current.left, &previous.left),
+    &mut sad,
+    &mut high_delta_samples,
+    &mut samples,
+  );
+  accumulate_scene_eye_metrics(
+    &current.right,
+    &previous.right,
+    find_base_mv(&current.right, &previous.right),
+    &mut sad,
+    &mut high_delta_samples,
+    &mut samples,
+  );
+
+  SceneChangeMetrics {
+    avg_y_delta: (sad / samples) as u32,
+    high_y_delta_percent: ((high_delta_samples * 100) / samples) as u32,
+  }
+}
+
+fn accumulate_scene_eye_metrics(
+  current: &EyeFrame, previous: &EyeFrame, mv: Mv, sad: &mut u64,
+  high_delta_samples: &mut u64, samples: &mut u64,
+) {
+  for y in (0..EYE_H).step_by(4) {
+    for x in (0..EYE_W).step_by(4) {
+      let sx = (x as i32 + mv.x as i32).clamp(0, EYE_W as i32 - 1) as usize;
+      let sy = (y as i32 + mv.y as i32).clamp(0, EYE_H as i32 - 1) as usize;
+      let delta = (current.y[y * EYE_W + x] as i32
+        - previous.y[sy * EYE_W + sx] as i32)
+        .unsigned_abs() as u64;
+      *sad += delta;
+      if delta >= SCENE_CUT_HIGH_Y_DELTA as u64 {
+        *high_delta_samples += 1;
+      }
+      *samples += 1;
+    }
+  }
 }
 
 fn encode_tile(
@@ -1202,5 +1320,23 @@ mod tests {
 
     let decoded = decode_stream(&stream).unwrap();
     assert_eq!(decoded[1], candidate.recon);
+  }
+
+  #[test]
+  fn scene_cut_detector_ignores_small_changes() {
+    let first = solid_frame(40, 90, 150);
+    let second = solid_frame(45, 90, 150);
+    let metrics = source_scene_change_metrics(&second, &first);
+
+    assert!(!scene_change_requires_keyframe(metrics));
+  }
+
+  #[test]
+  fn scene_cut_detector_flags_hard_cuts() {
+    let first = solid_frame(20, 90, 150);
+    let second = solid_frame(190, 90, 150);
+    let metrics = source_scene_change_metrics(&second, &first);
+
+    assert!(scene_change_requires_keyframe(metrics));
   }
 }
