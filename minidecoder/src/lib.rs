@@ -1399,14 +1399,17 @@ struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
+  #[inline(always)]
   fn new(bytes: &'a [u8]) -> Self {
     Self { bytes, pos: 0 }
   }
 
+  #[inline(always)]
   fn remaining(&self) -> usize {
     self.bytes.len() - self.pos
   }
 
+  #[inline(always)]
   fn take(&mut self, n: usize) -> Result<&'a [u8]> {
     if n > self.remaining() {
       return Err(Error::Eof);
@@ -1416,10 +1419,12 @@ impl<'a> Reader<'a> {
     Ok(&self.bytes[start..start + n])
   }
 
+  #[inline(always)]
   fn skip(&mut self, n: usize) -> Result<()> {
     self.take(n).map(|_| ())
   }
 
+  #[inline(always)]
   fn u8(&mut self) -> Result<u8> {
     if self.pos >= self.bytes.len() {
       return Err(Error::Eof);
@@ -1429,10 +1434,12 @@ impl<'a> Reader<'a> {
     Ok(value)
   }
 
+  #[inline(always)]
   fn i8(&mut self) -> Result<i8> {
     Ok(self.u8()? as i8)
   }
 
+  #[inline(always)]
   fn u16(&mut self) -> Result<u16> {
     let end = self.pos + 2;
     if end > self.bytes.len() {
@@ -1443,6 +1450,7 @@ impl<'a> Reader<'a> {
     Ok(u16::from_le_bytes([self.bytes[start], self.bytes[start + 1]]))
   }
 
+  #[inline(always)]
   fn i16(&mut self) -> Result<i16> {
     let end = self.pos + 2;
     if end > self.bytes.len() {
@@ -1453,6 +1461,7 @@ impl<'a> Reader<'a> {
     Ok(i16::from_le_bytes([self.bytes[start], self.bytes[start + 1]]))
   }
 
+  #[inline(always)]
   fn u32(&mut self) -> Result<u32> {
     let end = self.pos + 4;
     if end > self.bytes.len() {
@@ -1468,6 +1477,7 @@ impl<'a> Reader<'a> {
     ]))
   }
 
+  #[inline(always)]
   fn u64(&mut self) -> Result<u64> {
     let end = self.pos + 8;
     if end > self.bytes.len() {
