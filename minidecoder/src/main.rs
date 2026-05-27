@@ -15,7 +15,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let bytes = fs::read(&options.input)?;
   #[cfg(not(feature = "stats"))]
   if options.stats {
-    return Err("--stats requires building minidecoder with --features stats".into());
+    return Err(
+      "--stats requires building minidecoder with --features stats".into(),
+    );
   }
 
   #[cfg(feature = "stats")]
@@ -223,6 +225,37 @@ struct StreamStats {
   dc_only_blocks: usize,
   full_idct_blocks: usize,
   raw_4x4_blocks: usize,
+  p_work_units: usize,
+  max_p_work_units: usize,
+  max_p_segment_map_bytes: usize,
+  max_p_mode_bytes: usize,
+  max_p_residual_bytes: usize,
+  max_p_raw_bytes: usize,
+  max_p_skip_mb: usize,
+  max_p_copy16_mb: usize,
+  max_p_copy_vbs_mb: usize,
+  max_p_raw_mb: usize,
+  max_p_residual_mb: usize,
+  max_p_dc_only_blocks: usize,
+  max_p_full_idct_blocks: usize,
+  max_p_raw_4x4_blocks: usize,
+}
+
+#[cfg(feature = "stats")]
+#[derive(Clone, Copy, Default)]
+struct FrameWorkload {
+  segment_map_bytes: usize,
+  mode_bytes: usize,
+  residual_bytes: usize,
+  raw_bytes: usize,
+  skip_mb: usize,
+  copy16_mb: usize,
+  copy_vbs_mb: usize,
+  raw_mb: usize,
+  residual_mb: usize,
+  dc_only_blocks: usize,
+  full_idct_blocks: usize,
+  raw_4x4_blocks: usize,
 }
 
 #[cfg(feature = "stats")]
@@ -266,7 +299,116 @@ fn print_stream_stats(
     "stats blocks dc_only={} full_idct={} raw_4x4={}",
     stats.dc_only_blocks, stats.full_idct_blocks, stats.raw_4x4_blocks
   );
+  eprintln!(
+    "stats max_p_stream_bytes segment_map={} mode={} residual={} raw={}",
+    stats.max_p_segment_map_bytes,
+    stats.max_p_mode_bytes,
+    stats.max_p_residual_bytes,
+    stats.max_p_raw_bytes
+  );
+  eprintln!(
+    "stats max_p_mb skip={} copy16={} copy_vbs={} raw={} residual={}",
+    stats.max_p_skip_mb,
+    stats.max_p_copy16_mb,
+    stats.max_p_copy_vbs_mb,
+    stats.max_p_raw_mb,
+    stats.max_p_residual_mb
+  );
+  eprintln!(
+    "stats max_p_blocks dc_only={} full_idct={} raw_4x4={}",
+    stats.max_p_dc_only_blocks,
+    stats.max_p_full_idct_blocks,
+    stats.max_p_raw_4x4_blocks
+  );
+  if stats.p_frames > 0 {
+    eprintln!(
+      "stats estimated_work_units p_total={} p_avg={} p_max={} old3ds_15ms_cycles_268mhz={}",
+      stats.p_work_units,
+      stats.p_work_units / stats.p_frames,
+      stats.max_p_work_units,
+      268_000_000usize * 15 / 1000
+    );
+  }
   Ok(())
+}
+
+#[cfg(feature = "stats")]
+impl StreamStats {
+  fn workload_snapshot(&self) -> FrameWorkload {
+    FrameWorkload {
+      segment_map_bytes: self.segment_map_bytes,
+      mode_bytes: self.mode_bytes,
+      residual_bytes: self.residual_bytes,
+      raw_bytes: self.raw_bytes,
+      skip_mb: self.skip_mb,
+      copy16_mb: self.copy16_mb,
+      copy_vbs_mb: self.copy_vbs_mb,
+      raw_mb: self.raw_mb,
+      residual_mb: self.residual_mb,
+      dc_only_blocks: self.dc_only_blocks,
+      full_idct_blocks: self.full_idct_blocks,
+      raw_4x4_blocks: self.raw_4x4_blocks,
+    }
+  }
+
+  fn record_p_workload(&mut self, before: FrameWorkload, tile_count: usize) {
+    let after = self.workload_snapshot();
+    let frame = FrameWorkload {
+      segment_map_bytes: after.segment_map_bytes - before.segment_map_bytes,
+      mode_bytes: after.mode_bytes - before.mode_bytes,
+      residual_bytes: after.residual_bytes - before.residual_bytes,
+      raw_bytes: after.raw_bytes - before.raw_bytes,
+      skip_mb: after.skip_mb - before.skip_mb,
+      copy16_mb: after.copy16_mb - before.copy16_mb,
+      copy_vbs_mb: after.copy_vbs_mb - before.copy_vbs_mb,
+      raw_mb: after.raw_mb - before.raw_mb,
+      residual_mb: after.residual_mb - before.residual_mb,
+      dc_only_blocks: after.dc_only_blocks - before.dc_only_blocks,
+      full_idct_blocks: after.full_idct_blocks - before.full_idct_blocks,
+      raw_4x4_blocks: after.raw_4x4_blocks - before.raw_4x4_blocks,
+    };
+    let work_units = estimate_p_work_units(&frame, tile_count);
+    self.p_work_units += work_units;
+    self.max_p_work_units = self.max_p_work_units.max(work_units);
+    self.max_p_segment_map_bytes =
+      self.max_p_segment_map_bytes.max(frame.segment_map_bytes);
+    self.max_p_mode_bytes = self.max_p_mode_bytes.max(frame.mode_bytes);
+    self.max_p_residual_bytes =
+      self.max_p_residual_bytes.max(frame.residual_bytes);
+    self.max_p_raw_bytes = self.max_p_raw_bytes.max(frame.raw_bytes);
+    self.max_p_skip_mb = self.max_p_skip_mb.max(frame.skip_mb);
+    self.max_p_copy16_mb = self.max_p_copy16_mb.max(frame.copy16_mb);
+    self.max_p_copy_vbs_mb = self.max_p_copy_vbs_mb.max(frame.copy_vbs_mb);
+    self.max_p_raw_mb = self.max_p_raw_mb.max(frame.raw_mb);
+    self.max_p_residual_mb = self.max_p_residual_mb.max(frame.residual_mb);
+    self.max_p_dc_only_blocks =
+      self.max_p_dc_only_blocks.max(frame.dc_only_blocks);
+    self.max_p_full_idct_blocks =
+      self.max_p_full_idct_blocks.max(frame.full_idct_blocks);
+    self.max_p_raw_4x4_blocks =
+      self.max_p_raw_4x4_blocks.max(frame.raw_4x4_blocks);
+  }
+}
+
+#[cfg(feature = "stats")]
+fn estimate_p_work_units(frame: &FrameWorkload, tile_count: usize) -> usize {
+  let stream_parse_units = frame.segment_map_bytes
+    + frame.mode_bytes * 2
+    + frame.residual_bytes * 2
+    + frame.raw_bytes;
+  let prefill_units = tile_count * minidecoder::EYE_FRAME_BYTES;
+  let prediction_units =
+    (frame.copy16_mb + frame.copy_vbs_mb) * minidecoder::RAW_MB_BYTES;
+  let raw_units =
+    frame.raw_mb * minidecoder::RAW_MB_BYTES + frame.raw_4x4_blocks * 16;
+  let residual_units = frame.residual_mb * 8
+    + frame.dc_only_blocks * 64
+    + frame.full_idct_blocks * 512;
+  stream_parse_units
+    + prefill_units
+    + prediction_units
+    + raw_units
+    + residual_units
 }
 
 #[cfg(feature = "stats")]
@@ -338,6 +480,7 @@ fn collect_stream_stats(
         stats.p_frames += 1;
         stats.p_payload_bytes += frame_size;
         stats.max_p_payload_bytes = stats.max_p_payload_bytes.max(frame_size);
+        let before = stats.workload_snapshot();
         let mut pr = StatsReader::new(&bytes[payload_start..payload_end]);
         for _ in 0..2 {
           collect_tile_stats(&mut pr, &mut stats)?;
@@ -345,6 +488,7 @@ fn collect_stream_stats(
         if pr.remaining() != 0 {
           return Err("unconsumed P-frame payload".into());
         }
+        stats.record_p_workload(before, tile_count as usize);
       }
       _ => return Err(format!("unsupported frame type {frame_type}").into()),
     }
