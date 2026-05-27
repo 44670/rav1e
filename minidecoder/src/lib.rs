@@ -1020,6 +1020,7 @@ pub fn prefill_eye(dst: &mut EyeFrame, src: &EyeFrame, mv: Mv) {
   );
 }
 
+#[inline(always)]
 pub fn copy_mb_from_reference(
   dst: &mut EyeFrame, src: &EyeFrame, mb_index: usize, mv: Mv,
 ) {
@@ -1070,6 +1071,7 @@ pub enum VbsShape {
   Split8x8,
 }
 
+#[inline(always)]
 pub fn copy_vbs_from_reference(
   dst: &mut EyeFrame, src: &EyeFrame, mb_index: usize, shape: VbsShape,
   mvs: &[Mv],
@@ -1180,6 +1182,7 @@ pub fn copy_vbs_from_reference(
   );
 }
 
+#[inline(always)]
 fn average_mv(mvs: &[Mv]) -> (i32, i32) {
   let mut x = 0i32;
   let mut y = 0i32;
@@ -1191,6 +1194,7 @@ fn average_mv(mvs: &[Mv]) -> (i32, i32) {
   (round_div_i32(x, n), round_div_i32(y, n))
 }
 
+#[inline(always)]
 fn round_div_i32(value: i32, divisor: i32) -> i32 {
   if value >= 0 {
     (value + divisor / 2) / divisor
@@ -1236,6 +1240,7 @@ fn copy_shifted_row(dst: &mut [u8], src: &[u8], mv_x: i32) {
   }
 }
 
+#[inline(always)]
 fn copy_rect(
   dst: &mut [u8], src: &[u8], w: usize, h: usize, dst_x: usize, dst_y: usize,
   bw: usize, bh: usize, mv_x: i32, mv_y: i32,
@@ -1292,6 +1297,7 @@ fn copy_rect(
   }
 }
 
+#[inline(always)]
 fn copy_8(dst: &mut [u8], src: &[u8]) {
   dst[0] = src[0];
   dst[1] = src[1];
@@ -1303,6 +1309,7 @@ fn copy_8(dst: &mut [u8], src: &[u8]) {
   dst[7] = src[7];
 }
 
+#[inline(always)]
 fn copy_16(dst: &mut [u8], src: &[u8]) {
   dst[0] = src[0];
   dst[1] = src[1];
@@ -1322,6 +1329,7 @@ fn copy_16(dst: &mut [u8], src: &[u8]) {
   dst[15] = src[15];
 }
 
+#[inline(always)]
 fn write_raw_mb(current: &mut EyeFrame, mb_index: usize, bytes: &[u8]) {
   let mb_x = mb_index % MB_W;
   let mb_y = mb_index / MB_W;
