@@ -5,7 +5,8 @@ use minidecoder::{
   CHROMA_W, EYE_H, EYE_W, MB_H, MB_W, MODE_BASE_RES, MODE_COPY16,
   MODE_COPY16X8, MODE_COPY16X8_RES, MODE_COPY16_RES, MODE_COPY8X16,
   MODE_COPY8X16_RES, MODE_COPY8X8, MODE_COPY8X8_RES, MODE_RAW_MB,
-  SBS_FRAME_BYTES, TAG_DC_ONLY_S16, TAG_DC_ONLY_S8, TAG_RAW_4X4,
+  SBS_FRAME_BYTES, TAG_AC_MASK_S8, TAG_DC_ONLY_S16, TAG_DC_ONLY_S8,
+  TAG_RAW_4X4,
 };
 use std::env;
 use std::fs;
@@ -69,16 +70,32 @@ const FRAME_HEADER_BYTES: usize = 28;
 const KEY_RAW_CODED_BYTES: usize = FRAME_HEADER_BYTES + SBS_FRAME_BYTES;
 const RATE_WINDOW_FRAMES: usize = 24;
 const RATE_WINDOW_BYTES: usize = 2_000_000;
+const QUALITY_RECOVERY_WINDOW_BYTES: usize = RATE_WINDOW_BYTES;
 const P_FRAME_SOFT_TARGET_MIN: usize = 60 * 1024;
 const MAX_RAW_MB_PER_P_FRAME: usize = 96;
+const MAX_AC_MASK_BLOCKS_PER_P_FRAME: usize = 3_650;
+const MAX_FULL_IDCT_BLOCKS_PER_P_FRAME: usize = 3_650;
 const BUDGET_Q_STEPS: [i16; 8] = [4, 8, 12, 16, 24, 32, 48, 64];
 const QUALITY_RECOVERY_Q_STEP: i16 = 1;
-const QUALITY_RAW4X4_SSE_THRESHOLD: usize = 400;
-const QUALITY_BAD_Y_MAE_MILLI: u32 = 2_300;
-const QUALITY_BAD_Y_GT16_PER_MILLE: u32 = 10;
+const QUALITY_RECOVERY_RAW4X4_SSE_THRESHOLDS: [usize; 7] =
+  [400, 200, 100, 50, 25, 12, 4];
+const QUALITY_RECOVERY_RAW_MB_COST_BIAS: usize = 96;
+// 45 dB over one 800x240 luma frame is about 394k SSE.
+const QUALITY_TARGET_Y_SSE: u64 = 400_000;
+const QUALITY_RECOVERY_RELAXED_STOP_Y_SSE: u64 = QUALITY_TARGET_Y_SSE * 2;
+const QUALITY_RECOVERY_TIGHT_WINDOW_BYTES: usize = 1_700_000;
+const QUALITY_BAD_Y_MAE_MILLI: u32 = 1_800;
+const QUALITY_BAD_Y_GT16_PER_MILLE: u32 = 5;
+const QUALITY_RAW_KEY_Y_SSE: u64 = QUALITY_TARGET_Y_SSE * 10;
+const QUALITY_AC_MAX_EXTRA_COEFFS: usize = 6;
+const QUALITY_AC_MAX_PAYLOAD_BYTES: usize = 10;
+const QUALITY_AC_MAX_BLOCK_SSE: usize = 96;
+const QUALITY_AC_MIN_SSE_GAIN: usize = 96;
 const SCENE_CUT_AVG_Y_DELTA: u32 = 32;
 const SCENE_CUT_HIGH_Y_DELTA: u8 = 48;
 const SCENE_CUT_HIGH_Y_PERCENT: u32 = 25;
+const O3YV_ZIGZAG: [usize; 16] =
+  [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
 
 impl FrameStats {
   fn add_choice(&mut self, choice: &MbChoice) {
@@ -118,7 +135,7 @@ struct MbChoice {
 enum EncodeMode {
   Lossless,
   Budget { q_step: i16 },
-  QualityRecovery { q_step: i16 },
+  QualityRecovery { q_step: i16, raw4x4_sse_threshold: usize },
 }
 
 impl EncodeMode {
@@ -126,8 +143,8 @@ impl EncodeMode {
     match self {
       EncodeMode::Lossless => "lossless".into(),
       EncodeMode::Budget { q_step } => format!("budget-q{q_step}"),
-      EncodeMode::QualityRecovery { q_step } => {
-        format!("quality-recovery-q{q_step}")
+      EncodeMode::QualityRecovery { q_step, raw4x4_sse_threshold } => {
+        format!("quality-recovery-q{q_step}-raw4x4-sse{raw4x4_sse_threshold}")
       }
     }
   }
@@ -136,12 +153,21 @@ impl EncodeMode {
     match self {
       EncodeMode::Lossless => None,
       EncodeMode::Budget { q_step }
-      | EncodeMode::QualityRecovery { q_step } => Some(q_step),
+      | EncodeMode::QualityRecovery { q_step, .. } => Some(q_step),
     }
   }
 
   fn quality_recovery(self) -> bool {
     matches!(self, EncodeMode::QualityRecovery { .. })
+  }
+
+  fn raw4x4_sse_threshold(self) -> Option<usize> {
+    match self {
+      EncodeMode::QualityRecovery { raw4x4_sse_threshold, .. } => {
+        Some(raw4x4_sse_threshold)
+      }
+      _ => None,
+    }
   }
 }
 
@@ -249,6 +275,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       }
       let reference_frame =
         reference.as_ref().ok_or("missing reference frame")?;
+      let reserve_next_raw = next_frame_needs_raw_reserve(
+        frame_no,
+        frame_count,
+        last_raw_frame_no,
+        options.keyint,
+        &input,
+        &frame,
+      )?;
       let candidate = encode_budgeted_p_frame(
         frame_no as u32,
         &frame,
@@ -256,6 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         options.row_bands,
         options.max_p_frame_bytes,
         &recent_frame_bytes,
+        reserve_next_raw,
       );
       add_stats(&mut total, &candidate.stats);
       total.p_frame_bytes += candidate.stats.p_frame_bytes;
@@ -457,6 +492,7 @@ fn log_p_frame_stats(
 fn encode_budgeted_p_frame(
   frame_no: u32, frame: &SbsFrame, reference: &SbsFrame, row_bands: bool,
   max_p_frame_bytes: usize, recent_frame_bytes: &[usize],
+  reserve_next_raw: bool,
 ) -> PFrameCandidate {
   let lossless = encode_p_frame_candidate(
     frame_no,
@@ -486,22 +522,33 @@ fn encode_budgeted_p_frame(
     }
   }
 
-  if harmful_undershoot(&best, recent_frame_bytes) {
-    let recovery = encode_p_frame_candidate(
-      frame_no,
-      frame,
-      reference,
-      row_bands,
-      EncodeMode::QualityRecovery { q_step: QUALITY_RECOVERY_Q_STEP },
-    );
-    if p_frame_satisfies_budget(&recovery.stats, max_p_frame_bytes)
-      && recovery.quality.y_sse < best.quality.y_sse
-      && rolling_window_allows_frame_bytes(
-        recent_frame_bytes,
-        recovery.stats.p_frame_bytes,
-      )
-    {
-      best = recovery;
+  if should_try_quality_recovery(&best, recent_frame_bytes, reserve_next_raw) {
+    let recovery_stop_y_sse =
+      quality_recovery_stop_y_sse(&best, recent_frame_bytes, reserve_next_raw);
+    for raw4x4_sse_threshold in QUALITY_RECOVERY_RAW4X4_SSE_THRESHOLDS {
+      let recovery = encode_p_frame_candidate(
+        frame_no,
+        frame,
+        reference,
+        row_bands,
+        EncodeMode::QualityRecovery {
+          q_step: QUALITY_RECOVERY_Q_STEP,
+          raw4x4_sse_threshold,
+        },
+      );
+      if p_frame_satisfies_budget(&recovery.stats, max_p_frame_bytes)
+        && recovery.quality.y_sse < best.quality.y_sse
+        && rolling_window_allows_quality_recovery_frame_bytes(
+          recent_frame_bytes,
+          recovery.stats.p_frame_bytes,
+          reserve_next_raw,
+        )
+      {
+        best = recovery;
+        if best.quality.y_sse <= recovery_stop_y_sse {
+          break;
+        }
+      }
     }
   }
 
@@ -553,6 +600,8 @@ fn p_frame_satisfies_budget(
 ) -> bool {
   stats.p_frame_bytes <= max_p_frame_bytes
     && stats.raw_mb <= MAX_RAW_MB_PER_P_FRAME
+    && stats.ac_mask_blocks <= MAX_AC_MASK_BLOCKS_PER_P_FRAME
+    && stats.full_idct_blocks <= MAX_FULL_IDCT_BLOCKS_PER_P_FRAME
 }
 
 fn rolling_window_allows_keyframe(recent_frame_bytes: &[usize]) -> bool {
@@ -566,6 +615,31 @@ fn rolling_window_allows_frame_bytes(
     <= RATE_WINDOW_BYTES
 }
 
+fn rolling_window_allows_quality_recovery_frame_bytes(
+  recent_frame_bytes: &[usize], next_frame_bytes: usize,
+  reserve_next_raw: bool,
+) -> bool {
+  if reserve_next_raw {
+    return rolling_window_allows_next_raw_after_frame(
+      recent_frame_bytes,
+      next_frame_bytes,
+    );
+  }
+  rolling_window_bytes_after(recent_frame_bytes, next_frame_bytes)
+    <= QUALITY_RECOVERY_WINDOW_BYTES
+}
+
+fn rolling_window_allows_next_raw_after_frame(
+  recent_frame_bytes: &[usize], current_frame_bytes: usize,
+) -> bool {
+  let recent_bytes: usize = recent_frame_bytes
+    .iter()
+    .rev()
+    .take(RATE_WINDOW_FRAMES.saturating_sub(2))
+    .sum();
+  recent_bytes + current_frame_bytes + KEY_RAW_CODED_BYTES <= RATE_WINDOW_BYTES
+}
+
 fn rolling_window_bytes_after(
   recent_frame_bytes: &[usize], next_frame_bytes: usize,
 ) -> usize {
@@ -577,16 +651,65 @@ fn rolling_window_bytes_after(
   recent_bytes + next_frame_bytes
 }
 
-fn harmful_undershoot(
+fn should_try_quality_recovery(
   candidate: &PFrameCandidate, recent_frame_bytes: &[usize],
+  reserve_next_raw: bool,
 ) -> bool {
-  candidate.stats.p_frame_bytes < P_FRAME_SOFT_TARGET_MIN
-    && rolling_window_allows_frame_bytes(
+  let has_room = rolling_window_allows_quality_recovery_frame_bytes(
+    recent_frame_bytes,
+    candidate.stats.p_frame_bytes,
+    reserve_next_raw,
+  );
+  if !has_room {
+    return false;
+  }
+
+  candidate.quality.y_sse > QUALITY_TARGET_Y_SSE
+    || (candidate.stats.p_frame_bytes < P_FRAME_SOFT_TARGET_MIN
+      && rolling_window_allows_frame_bytes(
+        recent_frame_bytes,
+        P_FRAME_SOFT_TARGET_MIN,
+      )
+      && candidate.quality.y_mae_milli >= QUALITY_BAD_Y_MAE_MILLI
+      && candidate.quality.y_bad_gt16_per_mille
+        >= QUALITY_BAD_Y_GT16_PER_MILLE)
+    || candidate.quality.y_sse >= QUALITY_RAW_KEY_Y_SSE
+}
+
+fn quality_recovery_stop_y_sse(
+  candidate: &PFrameCandidate, recent_frame_bytes: &[usize],
+  reserve_next_raw: bool,
+) -> u64 {
+  if reserve_next_raw
+    || rolling_window_bytes_after(
       recent_frame_bytes,
-      P_FRAME_SOFT_TARGET_MIN,
-    )
-    && candidate.quality.y_mae_milli >= QUALITY_BAD_Y_MAE_MILLI
-    && candidate.quality.y_bad_gt16_per_mille >= QUALITY_BAD_Y_GT16_PER_MILLE
+      candidate.stats.p_frame_bytes,
+    ) >= QUALITY_RECOVERY_TIGHT_WINDOW_BYTES
+  {
+    QUALITY_RECOVERY_RELAXED_STOP_Y_SSE
+  } else {
+    QUALITY_TARGET_Y_SSE
+  }
+}
+
+fn next_frame_needs_raw_reserve(
+  frame_no: usize, frame_count: usize, last_raw_frame_no: Option<usize>,
+  keyint: usize, input: &[u8], current: &SbsFrame,
+) -> Result<bool, Box<dyn std::error::Error>> {
+  let next_frame_no = frame_no + 1;
+  if next_frame_no >= frame_count {
+    return Ok(false);
+  }
+  if raw_key_due_for_max_gap(next_frame_no, last_raw_frame_no, keyint) {
+    return Ok(true);
+  }
+
+  let start = next_frame_no * SBS_FRAME_BYTES;
+  let next =
+    SbsFrame::from_yuv420_sbs(&input[start..start + SBS_FRAME_BYTES])?;
+  Ok(scene_change_requires_keyframe(source_scene_change_metrics(
+    &next, current,
+  )))
 }
 
 fn scene_change_requires_keyframe(metrics: SceneChangeMetrics) -> bool {
@@ -816,7 +939,13 @@ fn choose_mb(
       mvs: Vec::new(),
       residual: Vec::new(),
       recon: raw.clone(),
-      cost: 1 + raw.len() + if mode.quality_recovery() { 24 } else { 0 },
+      cost: 1
+        + raw.len()
+        + if mode.quality_recovery() {
+          QUALITY_RECOVERY_RAW_MB_COST_BIAS
+        } else {
+          0
+        },
       raw,
       segment_id: 3,
       residual_stats: ResidualStats::default(),
@@ -934,14 +1063,15 @@ fn add_residual_candidates(
         });
       }
     }
-    EncodeMode::Budget { q_step } | EncodeMode::QualityRecovery { q_step } => {
+    EncodeMode::Budget { q_step }
+    | EncodeMode::QualityRecovery { q_step, .. } => {
       for (segment_id, segment_q) in aq_steps(q_step) {
         let residual = build_lossy_residual(
           src,
           pred,
           mb_index,
           segment_q,
-          mode.quality_recovery(),
+          mode.raw4x4_sse_threshold(),
         );
         candidates.push(MbChoice {
           mode: mode_id,
@@ -1328,9 +1458,15 @@ struct LossyResidual {
   stats: ResidualStats,
 }
 
+struct AcBlockCandidate {
+  bytes: Vec<u8>,
+  values: [u8; 16],
+  distortion: usize,
+}
+
 fn build_lossy_residual(
   src: &EyeFrame, pred: &EyeFrame, mb_index: usize, q_step: i16,
-  quality_recovery: bool,
+  raw4x4_sse_threshold: Option<usize>,
 ) -> LossyResidual {
   let mut recon_eye = pred.clone();
   let mut mask = 0u32;
@@ -1349,7 +1485,7 @@ fn build_lossy_residual(
       bx,
       by,
       q_step,
-      quality_recovery,
+      raw4x4_sse_threshold,
       &mut distortion,
       &mut stats,
     ) {
@@ -1368,7 +1504,7 @@ fn build_lossy_residual(
       bx,
       by,
       q_step,
-      quality_recovery,
+      raw4x4_sse_threshold,
       &mut distortion,
       &mut stats,
     ) {
@@ -1387,7 +1523,7 @@ fn build_lossy_residual(
       bx,
       by,
       q_step,
-      quality_recovery,
+      raw4x4_sse_threshold,
       &mut distortion,
       &mut stats,
     ) {
@@ -1412,8 +1548,8 @@ fn build_lossy_residual(
 
 fn lossy_block_payload(
   src: &[u8], pred: &[u8], recon: &mut [u8], stride: usize, x: usize,
-  y: usize, q_step: i16, quality_recovery: bool, distortion: &mut usize,
-  stats: &mut ResidualStats,
+  y: usize, q_step: i16, raw4x4_sse_threshold: Option<usize>,
+  distortion: &mut usize, stats: &mut ResidualStats,
 ) -> Option<Vec<u8>> {
   let mut sum = 0i32;
   for row in 0..4 {
@@ -1437,7 +1573,22 @@ fn lossy_block_payload(
     }
   }
 
-  if quality_recovery && dc_distortion >= QUALITY_RAW4X4_SSE_THRESHOLD {
+  if raw4x4_sse_threshold.is_some_and(|threshold| dc_distortion >= threshold) {
+    if let Some(ac) =
+      quality_ac_mask_candidate(src, pred, stride, x, y, delta, dc_distortion)
+    {
+      for row in 0..4 {
+        for col in 0..4 {
+          let idx = (y + row) * stride + x + col;
+          recon[idx] = ac.values[row * 4 + col];
+        }
+      }
+      *distortion += ac.distortion;
+      stats.ac_mask_blocks += 1;
+      stats.full_idct_blocks += 1;
+      return Some(ac.bytes);
+    }
+
     let mut out = Vec::with_capacity(17);
     out.push(TAG_RAW_4X4);
     for row in 0..4 {
@@ -1466,6 +1617,139 @@ fn lossy_block_payload(
   Some(dc_payload(delta))
 }
 
+fn quality_ac_mask_candidate(
+  src: &[u8], pred: &[u8], stride: usize, x: usize, y: usize, dc_delta: i16,
+  dc_distortion: usize,
+) -> Option<AcBlockCandidate> {
+  let dc_coeff = dc_delta.checked_mul(8)?;
+  if !i8::try_from(dc_coeff).is_ok() {
+    return None;
+  }
+
+  let mut src_values = [0i32; 16];
+  let mut pred_values = [0u8; 16];
+  for row in 0..4 {
+    for col in 0..4 {
+      let src_idx = (y + row) * stride + x + col;
+      let block_idx = row * 4 + col;
+      src_values[block_idx] = src[src_idx] as i32;
+      pred_values[block_idx] = pred[src_idx];
+    }
+  }
+
+  let mut coeffs = [0i32; 16];
+  coeffs[0] = dc_coeff as i32;
+  let dc_recon = idct_reconstruct_block(&pred_values, coeffs);
+  let mut residual = [0i32; 16];
+  for i in 0..16 {
+    residual[i] = src_values[i] - dc_recon[i] as i32;
+  }
+
+  let mut ac_choices = Vec::new();
+  for zz in 1..16 {
+    let natural = O3YV_ZIGZAG[zz];
+    let mut basis_coeffs = [0i32; 16];
+    basis_coeffs[natural] = 8;
+    let basis = idct_block_deltas(basis_coeffs);
+    let mut dot = 0i32;
+    let mut norm = 0i32;
+    for i in 0..16 {
+      dot += residual[i] * basis[i];
+      norm += basis[i] * basis[i];
+    }
+    if norm == 0 {
+      continue;
+    }
+    let coeff = round_div_i32(dot * 8, norm).clamp(-127, 127);
+    if coeff == 0 {
+      continue;
+    }
+    let scaled = round_div_i32(coeff * dot, 8);
+    let gain = (scaled * 2 - round_div_i32(coeff * coeff * norm, 64)).max(0);
+    if gain > 0 {
+      ac_choices.push((gain, zz, coeff));
+    }
+  }
+
+  ac_choices.sort_by(|a, b| b.0.cmp(&a.0));
+  let mut nz_mask = 1u16;
+  let mut extra_coeffs = 0usize;
+  for &(_, zz, coeff) in ac_choices.iter().take(QUALITY_AC_MAX_EXTRA_COEFFS) {
+    let natural = O3YV_ZIGZAG[zz];
+    coeffs[natural] = coeff;
+    nz_mask |= 1 << zz;
+    extra_coeffs += 1;
+  }
+  if extra_coeffs == 0 {
+    return None;
+  }
+
+  let values = idct_reconstruct_block(&pred_values, coeffs);
+  let mut distortion = 0usize;
+  for i in 0..16 {
+    let err = src_values[i] - values[i] as i32;
+    distortion += (err * err) as usize;
+  }
+  if distortion > QUALITY_AC_MAX_BLOCK_SSE
+    || dc_distortion.saturating_sub(distortion) < QUALITY_AC_MIN_SSE_GAIN
+  {
+    return None;
+  }
+
+  let payload_bytes = 1 + 2 + nz_mask.count_ones() as usize;
+  if payload_bytes > QUALITY_AC_MAX_PAYLOAD_BYTES {
+    return None;
+  }
+
+  let mut bytes = Vec::with_capacity(payload_bytes);
+  bytes.push(TAG_AC_MASK_S8);
+  bytes.extend_from_slice(&nz_mask.to_le_bytes());
+  for zz in 0..16 {
+    if (nz_mask & (1 << zz)) != 0 {
+      let coeff = coeffs[O3YV_ZIGZAG[zz]];
+      bytes.push(coeff as i8 as u8);
+    }
+  }
+  Some(AcBlockCandidate { bytes, values, distortion })
+}
+
+fn idct_reconstruct_block(pred: &[u8; 16], coeffs: [i32; 16]) -> [u8; 16] {
+  let deltas = idct_block_deltas(coeffs);
+  let mut out = [0u8; 16];
+  for i in 0..16 {
+    out[i] = clip_u8(pred[i] as i32 + deltas[i]);
+  }
+  out
+}
+
+fn idct_block_deltas(coeffs: [i32; 16]) -> [i32; 16] {
+  let mut tmp = [0i32; 16];
+  for col in 0..4 {
+    let a1 = coeffs[col] + coeffs[8 + col];
+    let b1 = coeffs[col] - coeffs[8 + col];
+    let c1 = ((coeffs[4 + col] * 35468) >> 16) - coeffs[12 + col];
+    let d1 = coeffs[4 + col] + ((coeffs[12 + col] * 35468) >> 16);
+    tmp[col] = a1 + d1;
+    tmp[4 + col] = b1 + c1;
+    tmp[8 + col] = b1 - c1;
+    tmp[12 + col] = a1 - d1;
+  }
+
+  let mut out = [0i32; 16];
+  for row in 0..4 {
+    let base = row * 4;
+    let a1 = tmp[base] + tmp[base + 2];
+    let b1 = tmp[base] - tmp[base + 2];
+    let c1 = ((tmp[base + 1] * 35468) >> 16) - tmp[base + 3];
+    let d1 = tmp[base + 1] + ((tmp[base + 3] * 35468) >> 16);
+    let vals = [a1 + d1, b1 + c1, b1 - c1, a1 - d1];
+    for (col, value) in vals.iter().enumerate() {
+      out[base + col] = (value + 4) >> 3;
+    }
+  }
+  out
+}
+
 fn quantize_delta(delta: i16, q_step: i16) -> i16 {
   let q = q_step.max(1) as i32;
   let delta = delta as i32;
@@ -1483,6 +1767,10 @@ fn round_div_i32(value: i32, divisor: i32) -> i32 {
   } else {
     -((-value + divisor / 2) / divisor)
   }
+}
+
+fn clip_u8(value: i32) -> u8 {
+  value.clamp(0, 255) as u8
 }
 
 fn dc_payload(delta: i16) -> Vec<u8> {
@@ -1694,7 +1982,7 @@ mod tests {
     let first = solid_frame(40, 90, 150);
     let second = noisy_frame();
     let candidate =
-      encode_budgeted_p_frame(1, &second, &first, true, 64 * 1024, &[]);
+      encode_budgeted_p_frame(1, &second, &first, true, 64 * 1024, &[], false);
     assert!(candidate.stats.p_frame_bytes <= 64 * 1024);
     assert_eq!(candidate.stats.raw_mb, 0);
 
@@ -1705,6 +1993,76 @@ mod tests {
 
     let decoded = decode_stream(&stream).unwrap();
     assert_eq!(decoded[1], candidate.recon);
+  }
+
+  #[test]
+  fn quality_recovery_ac_mask_matches_decoder() {
+    let pred_block = [80u8; 16];
+    let mut coeffs = [0i32; 16];
+    coeffs[O3YV_ZIGZAG[1]] = 64;
+    coeffs[O3YV_ZIGZAG[2]] = -48;
+    let src_block = idct_reconstruct_block(&pred_block, coeffs);
+
+    let pred = vec![80u8; EYE_W * EYE_H];
+    let mut src = pred.clone();
+    for row in 0..4 {
+      src[row * EYE_W..row * EYE_W + 4]
+        .copy_from_slice(&src_block[row * 4..row * 4 + 4]);
+    }
+    let dc_distortion = src_block
+      .iter()
+      .map(|&value| {
+        let err = value as i32 - 80;
+        (err * err) as usize
+      })
+      .sum();
+
+    let ac =
+      quality_ac_mask_candidate(&src, &pred, EYE_W, 0, 0, 0, dc_distortion)
+        .expect("test pattern should produce an AC mask candidate");
+    assert_eq!(ac.bytes[0], TAG_AC_MASK_S8);
+
+    let first = solid_frame(80, 128, 128);
+    let mut residual = 1u32.to_le_bytes().to_vec();
+    residual.extend_from_slice(&ac.bytes);
+    let left = EncodedTile {
+      tile_id: 0,
+      base_mv: Mv::ZERO,
+      segment_count: 1,
+      fragments: vec![EncodedFragment::full_eye(
+        0,
+        vec![0x80 | MODE_BASE_RES, 0x7f, 0x7f, 0x78, 0],
+        residual,
+        Vec::new(),
+      )],
+    };
+    let right = EncodedTile {
+      tile_id: 1,
+      base_mv: Mv::ZERO,
+      segment_count: 1,
+      fragments: vec![EncodedFragment::full_eye(
+        1,
+        vec![0x7f, 0x7f, 0x79, 0],
+        Vec::new(),
+        Vec::new(),
+      )],
+    };
+
+    let mut stream = Vec::new();
+    write_file_header(&mut stream, 2);
+    write_key_raw_frame(&mut stream, 0, &first);
+    write_p_frame(&mut stream, 1, left, right);
+
+    let decoded = decode_stream(&stream).unwrap();
+    for row in 0..4 {
+      for col in 0..4 {
+        assert_eq!(
+          decoded[1].left.y[row * EYE_W + col],
+          ac.values[row * 4 + col]
+        );
+      }
+    }
+    assert_eq!(decoded[1].right, first.right);
   }
 
   #[test]
