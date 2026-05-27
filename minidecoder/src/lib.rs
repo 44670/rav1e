@@ -167,6 +167,13 @@ pub struct DecodedFrame {
   pub frame: SbsFrame,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DecodedFrameRef<'a> {
+  pub frame_no: u32,
+  pub frame_type: u8,
+  pub frame: &'a SbsFrame,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mv {
   pub x: i8,
@@ -297,10 +304,27 @@ pub fn decode_stream(bytes: &[u8]) -> Result<Vec<SbsFrame>> {
 }
 
 pub fn decode_stream_with_metadata(bytes: &[u8]) -> Result<Vec<DecodedFrame>> {
+  let mut frames = Vec::new();
+  decode_stream_for_each(bytes, |decoded| {
+    frames.push(DecodedFrame {
+      frame_no: decoded.frame_no,
+      frame_type: decoded.frame_type,
+      frame: decoded.frame.clone(),
+    });
+  })?;
+  Ok(frames)
+}
+
+pub fn decode_stream_for_each<F>(
+  bytes: &[u8], mut on_frame: F,
+) -> Result<usize>
+where
+  F: FnMut(DecodedFrameRef<'_>),
+{
   let mut r = Reader::new(bytes);
   parse_file_header(&mut r)?;
 
-  let mut frames = Vec::new();
+  let mut frame_count = 0usize;
   let mut reference: Option<SbsFrame> = None;
 
   while r.remaining() > 0 {
@@ -372,11 +396,12 @@ pub fn decode_stream_with_metadata(bytes: &[u8]) -> Result<Vec<DecodedFrame>> {
     };
 
     r.pos = payload_end;
-    reference = Some(frame.clone());
-    frames.push(DecodedFrame { frame_no, frame_type, frame });
+    on_frame(DecodedFrameRef { frame_no, frame_type, frame: &frame });
+    reference = Some(frame);
+    frame_count += 1;
   }
 
-  Ok(frames)
+  Ok(frame_count)
 }
 
 fn write_frame_header(
@@ -827,13 +852,7 @@ fn apply_block(
         return Err(Error::Invalid("reserved DC_ONLY_S8 tag bits set".into()));
       }
       let coeff = residual.i8()? as i32;
-      add_idct_block(
-        plane,
-        stride,
-        x,
-        y,
-        [coeff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-      );
+      add_dc_block(plane, stride, x, y, coeff);
     }
     0x40 => {
       if tag != TAG_DC_ONLY_S16 {
@@ -842,13 +861,7 @@ fn apply_block(
         ));
       }
       let coeff = residual.i16()? as i32;
-      add_idct_block(
-        plane,
-        stride,
-        x,
-        y,
-        [coeff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-      );
+      add_dc_block(plane, stride, x, y, coeff);
     }
     0x80 => {
       if tag != TAG_AC_MASK_S8 {
@@ -892,6 +905,23 @@ fn apply_block(
     _ => unreachable!(),
   }
   Ok(())
+}
+
+fn add_dc_block(
+  plane: &mut [u8], stride: usize, x: usize, y: usize, coeff: i32,
+) {
+  let delta = (coeff + 4) >> 3;
+  if delta == 0 {
+    return;
+  }
+
+  for row in 0..4 {
+    let base = (y + row) * stride + x;
+    for col in 0..4 {
+      let idx = base + col;
+      plane[idx] = clip_u8(plane[idx] as i32 + delta);
+    }
+  }
 }
 
 fn add_idct_block(
@@ -1469,6 +1499,23 @@ mod tests {
         let before = frames[0].left.y[row * EYE_W + col] as i32;
         assert_eq!(frames[1].left.y[row * EYE_W + col], clip_u8(before + 5));
       }
+    }
+  }
+
+  #[test]
+  fn dc_fast_path_matches_idct_rounding() {
+    for coeff in -64..=64 {
+      let mut dc_plane = vec![91u8; 8 * 8];
+      let mut idct_plane = dc_plane.clone();
+      add_dc_block(&mut dc_plane, 8, 2, 2, coeff);
+      add_idct_block(
+        &mut idct_plane,
+        8,
+        2,
+        2,
+        [coeff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      );
+      assert_eq!(dc_plane, idct_plane);
     }
   }
 

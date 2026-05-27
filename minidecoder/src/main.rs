@@ -1,7 +1,8 @@
 use image::{Rgb, RgbImage};
 use minidecoder::{
-  decode_stream_with_metadata, SbsFrame, CHROMA_W, EYE_H, EYE_W,
-  FRAME_TYPE_KEY_RAW, FRAME_TYPE_P, SBS_FRAME_BYTES, VISIBLE_H, VISIBLE_W,
+  decode_stream_for_each, decode_stream_with_metadata, SbsFrame, CHROMA_W,
+  EYE_H, EYE_W, FRAME_TYPE_KEY_RAW, FRAME_TYPE_P, SBS_FRAME_BYTES, VISIBLE_H,
+  VISIBLE_W,
 };
 use std::env;
 use std::fs;
@@ -11,6 +12,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let options = parse_args()?;
 
   let bytes = fs::read(&options.input)?;
+  if options.output.is_none() && options.png_dir.is_none() {
+    let frame_count = decode_stream_for_each(&bytes, |_| {})?;
+    eprintln!("decoded {frame_count} frame(s)");
+    return Ok(());
+  }
+
   let frames = decode_stream_with_metadata(&bytes)?;
   eprintln!("decoded {} frame(s)", frames.len());
 
