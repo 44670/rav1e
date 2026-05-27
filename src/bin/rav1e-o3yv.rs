@@ -2,11 +2,11 @@ use minidecoder::{
   copy_mb_from_reference, copy_vbs_from_reference, decode_stream, prefill_eye,
   read_raw_mb, write_file_header, write_key_raw_frame, write_p_frame,
   EncodedFragment, EncodedTile, EyeFrame, Mv, SbsFrame, VbsShape, CHROMA_H,
-  CHROMA_W, EYE_H, EYE_W, MB_H, MB_W, MODE_BASE_RES, MODE_COPY16,
-  MODE_COPY16X8, MODE_COPY16X8_RES, MODE_COPY16_RES, MODE_COPY8X16,
-  MODE_COPY8X16_RES, MODE_COPY8X8, MODE_COPY8X8_RES, MODE_RAW_MB,
-  SBS_FRAME_BYTES, TAG_AC_MASK_S8, TAG_DC_ONLY_S16, TAG_DC_ONLY_S8,
-  TAG_RAW_4X4,
+  CHROMA_W, EYE_FRAME_BYTES, EYE_H, EYE_W, MB_H, MB_W, MODE_BASE_RES,
+  MODE_COPY16, MODE_COPY16X8, MODE_COPY16X8_RES, MODE_COPY16_RES,
+  MODE_COPY8X16, MODE_COPY8X16_RES, MODE_COPY8X8, MODE_COPY8X8_RES,
+  MODE_RAW_MB, RAW_MB_BYTES, SBS_FRAME_BYTES, TAG_AC_MASK_S8, TAG_DC_ONLY_S16,
+  TAG_DC_ONLY_S8, TAG_RAW_4X4,
 };
 use std::env;
 use std::fs;
@@ -37,9 +37,11 @@ struct FrameStats {
   dc_only_blocks: usize,
   ac_mask_blocks: usize,
   full_idct_blocks: usize,
+  segment_map_stream_bytes: usize,
   mode_stream_bytes: usize,
   residual_stream_bytes: usize,
   raw_stream_bytes: usize,
+  decode_work_units: usize,
   distortion: usize,
 }
 
@@ -75,6 +77,7 @@ const P_FRAME_SOFT_TARGET_MIN: usize = 60 * 1024;
 const MAX_RAW_MB_PER_P_FRAME: usize = 96;
 const MAX_AC_MASK_BLOCKS_PER_P_FRAME: usize = 3_650;
 const MAX_FULL_IDCT_BLOCKS_PER_P_FRAME: usize = 3_650;
+const MAX_P_DECODE_WORK_UNITS: usize = 2_200_000;
 const BUDGET_Q_STEPS: [i16; 8] = [4, 8, 12, 16, 24, 32, 48, 64];
 const QUALITY_RECOVERY_Q_STEP: i16 = 1;
 const QUALITY_RECOVERY_RAW4X4_SSE_THRESHOLDS: [usize; 7] =
@@ -337,7 +340,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
   write_output(&options.output, &stream)?;
   eprintln!(
-    "wrote {} bytes, frames={}, key_frames={}, p_bytes={}, skip={} copy16={} copy16_res={} vbs={} vbs_res={} base_res={} raw_mb={} raw4x4={} dc={} ac={} full_idct={}",
+    "wrote {} bytes, frames={}, key_frames={}, p_bytes={}, skip={} copy16={} copy16_res={} vbs={} vbs_res={} base_res={} raw_mb={} raw4x4={} dc={} ac={} full_idct={} decode_work={}",
     stream.len(),
     frame_count,
     key_frames,
@@ -352,7 +355,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     total.raw_4x4_blocks,
     total.dc_only_blocks,
     total.ac_mask_blocks,
-    total.full_idct_blocks
+    total.full_idct_blocks,
+    total.decode_work_units
   );
   Ok(())
 }
@@ -445,11 +449,12 @@ fn log_key_frame_stats(
   let rolling_1s_bytes =
     rolling_window_bytes_after(recent_frame_bytes, frame_bytes);
   eprintln!(
-    "{{\"kind\":\"o3yv_frame_stats\",\"frame_no\":{},\"frame_type\":\"raw\",\"frame_size_bytes\":{},\"rolling_1s_bytes\":{},\"reason\":\"{}\",\"q_step\":-1,\"skip_base_mb\":0,\"copy16_mb\":0,\"copy_vbs_mb\":0,\"base_res_mb\":0,\"raw_mb\":0,\"raw_4x4_blocks\":0,\"dc_only_blocks\":0,\"ac_mask_blocks\":0,\"full_idct_blocks\":0,\"residual_stream_bytes\":0,\"raw_stream_bytes\":{},\"mode_stream_bytes\":0,\"y_sse\":0,\"y_mae_milli\":0,\"y_bad_gt16_per_mille\":0,\"y_bad_gt32_per_mille\":0,\"max_mb_y_sse\":0,\"quality_recovery_used\":false}}",
+    "{{\"kind\":\"o3yv_frame_stats\",\"frame_no\":{},\"frame_type\":\"raw\",\"frame_size_bytes\":{},\"rolling_1s_bytes\":{},\"reason\":\"{}\",\"q_step\":-1,\"skip_base_mb\":0,\"copy16_mb\":0,\"copy_vbs_mb\":0,\"base_res_mb\":0,\"raw_mb\":0,\"raw_4x4_blocks\":0,\"dc_only_blocks\":0,\"ac_mask_blocks\":0,\"full_idct_blocks\":0,\"segment_map_stream_bytes\":0,\"residual_stream_bytes\":0,\"raw_stream_bytes\":{},\"mode_stream_bytes\":0,\"decode_work_units\":{},\"y_sse\":0,\"y_mae_milli\":0,\"y_bad_gt16_per_mille\":0,\"y_bad_gt32_per_mille\":0,\"max_mb_y_sse\":0,\"quality_recovery_used\":false}}",
     frame_no,
     frame_bytes,
     rolling_1s_bytes,
     reason,
+    SBS_FRAME_BYTES,
     SBS_FRAME_BYTES
   );
 }
@@ -462,7 +467,7 @@ fn log_p_frame_stats(
     candidate.stats.p_frame_bytes,
   );
   eprintln!(
-    "{{\"kind\":\"o3yv_frame_stats\",\"frame_no\":{},\"frame_type\":\"p\",\"frame_size_bytes\":{},\"rolling_1s_bytes\":{},\"q_step\":{},\"skip_base_mb\":{},\"copy16_mb\":{},\"copy_vbs_mb\":{},\"base_res_mb\":{},\"raw_mb\":{},\"raw_4x4_blocks\":{},\"dc_only_blocks\":{},\"ac_mask_blocks\":{},\"full_idct_blocks\":{},\"residual_stream_bytes\":{},\"raw_stream_bytes\":{},\"mode_stream_bytes\":{},\"left_base_mv_x\":{},\"left_base_mv_y\":{},\"right_base_mv_x\":{},\"right_base_mv_y\":{},\"y_sse\":{},\"y_mae_milli\":{},\"y_bad_gt16_per_mille\":{},\"y_bad_gt32_per_mille\":{},\"max_mb_y_sse\":{},\"quality_recovery_used\":{}}}",
+    "{{\"kind\":\"o3yv_frame_stats\",\"frame_no\":{},\"frame_type\":\"p\",\"frame_size_bytes\":{},\"rolling_1s_bytes\":{},\"q_step\":{},\"skip_base_mb\":{},\"copy16_mb\":{},\"copy_vbs_mb\":{},\"base_res_mb\":{},\"raw_mb\":{},\"raw_4x4_blocks\":{},\"dc_only_blocks\":{},\"ac_mask_blocks\":{},\"full_idct_blocks\":{},\"segment_map_stream_bytes\":{},\"residual_stream_bytes\":{},\"raw_stream_bytes\":{},\"mode_stream_bytes\":{},\"decode_work_units\":{},\"left_base_mv_x\":{},\"left_base_mv_y\":{},\"right_base_mv_x\":{},\"right_base_mv_y\":{},\"y_sse\":{},\"y_mae_milli\":{},\"y_bad_gt16_per_mille\":{},\"y_bad_gt32_per_mille\":{},\"max_mb_y_sse\":{},\"quality_recovery_used\":{}}}",
     frame_no,
     candidate.stats.p_frame_bytes,
     rolling_1s_bytes,
@@ -476,9 +481,11 @@ fn log_p_frame_stats(
     candidate.stats.dc_only_blocks,
     candidate.stats.ac_mask_blocks,
     candidate.stats.full_idct_blocks,
+    candidate.stats.segment_map_stream_bytes,
     candidate.stats.residual_stream_bytes,
     candidate.stats.raw_stream_bytes,
     candidate.stats.mode_stream_bytes,
+    candidate.stats.decode_work_units,
     candidate.left_base_mv.x,
     candidate.left_base_mv.y,
     candidate.right_base_mv.x,
@@ -557,9 +564,10 @@ fn encode_budgeted_p_frame(
 
   if !p_frame_satisfies_budget(&best.stats, max_p_frame_bytes) {
     eprintln!(
-      "warning: frame {frame_no} still exceeds budget after quantization: bytes={} raw_mb={} (limits: bytes<={max_p_frame_bytes}, raw_mb<={MAX_RAW_MB_PER_P_FRAME})",
+      "warning: frame {frame_no} still exceeds budget after quantization: bytes={} raw_mb={} decode_work={} (limits: bytes<={max_p_frame_bytes}, raw_mb<={MAX_RAW_MB_PER_P_FRAME}, decode_work<={MAX_P_DECODE_WORK_UNITS})",
       best.stats.p_frame_bytes,
-      best.stats.raw_mb
+      best.stats.raw_mb,
+      best.stats.decode_work_units
     );
   }
   best
@@ -582,6 +590,7 @@ fn encode_p_frame_candidate(
   add_stats(&mut stats, &left_stats);
   add_stats(&mut stats, &right_stats);
   stats.p_frame_bytes = bytes.len();
+  stats.decode_work_units = estimate_p_decode_work_units(&stats);
   let recon = SbsFrame { left: left_recon, right: right_recon };
   let quality = frame_quality_metrics(frame, &recon);
 
@@ -605,6 +614,27 @@ fn p_frame_satisfies_budget(
     && stats.raw_mb <= MAX_RAW_MB_PER_P_FRAME
     && stats.ac_mask_blocks <= MAX_AC_MASK_BLOCKS_PER_P_FRAME
     && stats.full_idct_blocks <= MAX_FULL_IDCT_BLOCKS_PER_P_FRAME
+    && stats.decode_work_units <= MAX_P_DECODE_WORK_UNITS
+}
+
+fn estimate_p_decode_work_units(stats: &FrameStats) -> usize {
+  let stream_parse_units = stats.segment_map_stream_bytes
+    + stats.mode_stream_bytes * 2
+    + stats.residual_stream_bytes * 2
+    + stats.raw_stream_bytes;
+  let prefill_units = 2 * EYE_FRAME_BYTES;
+  let prediction_mb =
+    stats.copy16_mb + stats.copy16_res_mb + stats.vbs_mb + stats.vbs_res_mb;
+  let prediction_units = prediction_mb * RAW_MB_BYTES;
+  let raw_units = stats.raw_mb * RAW_MB_BYTES + stats.raw_4x4_blocks * 16;
+  let residual_mb = stats.base_res_mb + stats.copy16_res_mb + stats.vbs_res_mb;
+  let residual_units =
+    residual_mb * 8 + stats.dc_only_blocks * 64 + stats.full_idct_blocks * 512;
+  stream_parse_units
+    + prefill_units
+    + prediction_units
+    + raw_units
+    + residual_units
 }
 
 fn rolling_window_allows_keyframe(recent_frame_bytes: &[usize]) -> bool {
@@ -916,6 +946,8 @@ fn encode_tile(
       fragment.segment_map_stream.clear();
     }
   }
+  stats.segment_map_stream_bytes =
+    fragments.iter().map(|fragment| fragment.segment_map_stream.len()).sum();
 
   let tile = EncodedTile { tile_id, base_mv, segment_count, fragments };
   (tile, recon, stats)
@@ -1924,9 +1956,11 @@ fn add_stats(total: &mut FrameStats, frame: &FrameStats) {
   total.dc_only_blocks += frame.dc_only_blocks;
   total.ac_mask_blocks += frame.ac_mask_blocks;
   total.full_idct_blocks += frame.full_idct_blocks;
+  total.segment_map_stream_bytes += frame.segment_map_stream_bytes;
   total.mode_stream_bytes += frame.mode_stream_bytes;
   total.residual_stream_bytes += frame.residual_stream_bytes;
   total.raw_stream_bytes += frame.raw_stream_bytes;
+  total.decode_work_units += frame.decode_work_units;
   total.distortion += frame.distortion;
 }
 
