@@ -924,6 +924,13 @@ fn add_idct_block(
 }
 
 pub fn prefill_eye(dst: &mut EyeFrame, src: &EyeFrame, mv: Mv) {
+  if mv == Mv::ZERO {
+    dst.y.copy_from_slice(&src.y);
+    dst.cb.copy_from_slice(&src.cb);
+    dst.cr.copy_from_slice(&src.cr);
+    return;
+  }
+
   motion_copy_plane(
     &mut dst.y,
     &src.y,
@@ -1132,6 +1139,11 @@ fn round_div_i32(value: i32, divisor: i32) -> i32 {
 fn motion_copy_plane(
   dst: &mut [u8], src: &[u8], w: usize, h: usize, mv_x: i32, mv_y: i32,
 ) {
+  if mv_x == 0 && mv_y == 0 {
+    dst.copy_from_slice(src);
+    return;
+  }
+
   for y in 0..h {
     for x in 0..w {
       let sx = clamp_i32(x as i32 + mv_x, 0, w as i32 - 1) as usize;
@@ -1145,6 +1157,14 @@ fn copy_rect(
   dst: &mut [u8], src: &[u8], w: usize, h: usize, dst_x: usize, dst_y: usize,
   bw: usize, bh: usize, mv_x: i32, mv_y: i32,
 ) {
+  if mv_x == 0 && mv_y == 0 {
+    for row in 0..bh {
+      let off = (dst_y + row) * w + dst_x;
+      dst[off..off + bw].copy_from_slice(&src[off..off + bw]);
+    }
+    return;
+  }
+
   for row in 0..bh {
     for col in 0..bw {
       let x = dst_x + col;
