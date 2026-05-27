@@ -32,6 +32,31 @@ struct FrameStats {
   base_res_mb: usize,
   raw_mb: usize,
   p_frame_bytes: usize,
+  raw_4x4_blocks: usize,
+  dc_only_blocks: usize,
+  ac_mask_blocks: usize,
+  full_idct_blocks: usize,
+  mode_stream_bytes: usize,
+  residual_stream_bytes: usize,
+  raw_stream_bytes: usize,
+  distortion: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ResidualStats {
+  raw_4x4_blocks: usize,
+  dc_only_blocks: usize,
+  ac_mask_blocks: usize,
+  full_idct_blocks: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct QualityMetrics {
+  y_sse: u64,
+  y_mae_milli: u32,
+  y_bad_gt16_per_mille: u32,
+  y_bad_gt32_per_mille: u32,
+  max_mb_y_sse: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,8 +69,13 @@ const FRAME_HEADER_BYTES: usize = 28;
 const KEY_RAW_CODED_BYTES: usize = FRAME_HEADER_BYTES + SBS_FRAME_BYTES;
 const RATE_WINDOW_FRAMES: usize = 24;
 const RATE_WINDOW_BYTES: usize = 2_000_000;
+const P_FRAME_SOFT_TARGET_MIN: usize = 60 * 1024;
 const MAX_RAW_MB_PER_P_FRAME: usize = 96;
 const BUDGET_Q_STEPS: [i16; 8] = [4, 8, 12, 16, 24, 32, 48, 64];
+const QUALITY_RECOVERY_Q_STEP: i16 = 1;
+const QUALITY_RAW4X4_SSE_THRESHOLD: usize = 400;
+const QUALITY_BAD_Y_MAE_MILLI: u32 = 2_300;
+const QUALITY_BAD_Y_GT16_PER_MILLE: u32 = 10;
 const SCENE_CUT_AVG_Y_DELTA: u32 = 32;
 const SCENE_CUT_HIGH_Y_DELTA: u8 = 48;
 const SCENE_CUT_HIGH_Y_PERCENT: u32 = 25;
@@ -63,6 +93,11 @@ impl FrameStats {
       MODE_RAW_MB => self.raw_mb += 1,
       _ => {}
     }
+    self.raw_4x4_blocks += choice.residual_stats.raw_4x4_blocks;
+    self.dc_only_blocks += choice.residual_stats.dc_only_blocks;
+    self.ac_mask_blocks += choice.residual_stats.ac_mask_blocks;
+    self.full_idct_blocks += choice.residual_stats.full_idct_blocks;
+    self.distortion += choice.distortion;
   }
 }
 
@@ -75,12 +110,15 @@ struct MbChoice {
   recon: Vec<u8>,
   cost: usize,
   segment_id: u8,
+  residual_stats: ResidualStats,
+  distortion: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EncodeMode {
   Lossless,
   Budget { q_step: i16 },
+  QualityRecovery { q_step: i16 },
 }
 
 impl EncodeMode {
@@ -88,7 +126,22 @@ impl EncodeMode {
     match self {
       EncodeMode::Lossless => "lossless".into(),
       EncodeMode::Budget { q_step } => format!("budget-q{q_step}"),
+      EncodeMode::QualityRecovery { q_step } => {
+        format!("quality-recovery-q{q_step}")
+      }
     }
+  }
+
+  fn q_step(self) -> Option<i16> {
+    match self {
+      EncodeMode::Lossless => None,
+      EncodeMode::Budget { q_step }
+      | EncodeMode::QualityRecovery { q_step } => Some(q_step),
+    }
+  }
+
+  fn quality_recovery(self) -> bool {
+    matches!(self, EncodeMode::QualityRecovery { .. })
   }
 }
 
@@ -97,6 +150,11 @@ struct PFrameCandidate {
   recon: SbsFrame,
   stats: FrameStats,
   mode_name: String,
+  q_step: Option<i16>,
+  quality: QualityMetrics,
+  quality_recovery_used: bool,
+  left_base_mv: Mv,
+  right_base_mv: Mv,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -163,6 +221,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         _ => unreachable!("scene-cut keyframe requires metrics"),
       }
+      let key_reason = if frame_no == 0 {
+        "first"
+      } else if periodic_key {
+        "keyint"
+      } else {
+        "scene-cut"
+      };
+      log_key_frame_stats(
+        frame_no,
+        stream.len() - frame_start,
+        &recent_frame_bytes,
+        key_reason,
+      );
       frame.clone()
     } else {
       if scene_cut {
@@ -181,11 +252,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         reference_frame,
         options.row_bands,
         options.max_p_frame_bytes,
+        &recent_frame_bytes,
       );
       add_stats(&mut total, &candidate.stats);
       total.p_frame_bytes += candidate.stats.p_frame_bytes;
       eprintln!(
-        "frame {frame_no}: mode={} bytes={} skip={} copy16={} copy16_res={} vbs={} vbs_res={} base_res={} raw_mb={}",
+        "frame {frame_no}: mode={} bytes={} skip={} copy16={} copy16_res={} vbs={} vbs_res={} base_res={} raw_mb={} raw4x4={} dc={} ac={} y_mae_milli={} y_bad16_pm={}",
         candidate.mode_name,
         candidate.stats.p_frame_bytes,
         candidate.stats.skip_mb,
@@ -194,8 +266,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         candidate.stats.vbs_mb,
         candidate.stats.vbs_res_mb,
         candidate.stats.base_res_mb,
-        candidate.stats.raw_mb
+        candidate.stats.raw_mb,
+        candidate.stats.raw_4x4_blocks,
+        candidate.stats.dc_only_blocks,
+        candidate.stats.ac_mask_blocks,
+        candidate.quality.y_mae_milli,
+        candidate.quality.y_bad_gt16_per_mille
       );
+      log_p_frame_stats(frame_no, &candidate, &recent_frame_bytes);
       stream.extend_from_slice(&candidate.bytes);
       candidate.recon
     };
@@ -218,7 +296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
   write_output(&options.output, &stream)?;
   eprintln!(
-    "wrote {} bytes, frames={}, key_frames={}, p_bytes={}, skip={} copy16={} copy16_res={} vbs={} vbs_res={} base_res={} raw_mb={}",
+    "wrote {} bytes, frames={}, key_frames={}, p_bytes={}, skip={} copy16={} copy16_res={} vbs={} vbs_res={} base_res={} raw_mb={} raw4x4={} dc={} ac={} full_idct={}",
     stream.len(),
     frame_count,
     key_frames,
@@ -229,7 +307,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     total.vbs_mb,
     total.vbs_res_mb,
     total.base_res_mb,
-    total.raw_mb
+    total.raw_mb,
+    total.raw_4x4_blocks,
+    total.dc_only_blocks,
+    total.ac_mask_blocks,
+    total.full_idct_blocks
   );
   Ok(())
 }
@@ -307,9 +389,63 @@ fn write_output(path: &str, bytes: &[u8]) -> io::Result<()> {
   }
 }
 
+fn log_key_frame_stats(
+  frame_no: usize, frame_bytes: usize, recent_frame_bytes: &[usize],
+  reason: &str,
+) {
+  let rolling_1s_bytes =
+    rolling_window_bytes_after(recent_frame_bytes, frame_bytes);
+  eprintln!(
+    "{{\"kind\":\"o3yv_frame_stats\",\"frame_no\":{},\"frame_type\":\"raw\",\"frame_size_bytes\":{},\"rolling_1s_bytes\":{},\"reason\":\"{}\",\"q_step\":-1,\"skip_base_mb\":0,\"copy16_mb\":0,\"copy_vbs_mb\":0,\"base_res_mb\":0,\"raw_mb\":0,\"raw_4x4_blocks\":0,\"dc_only_blocks\":0,\"ac_mask_blocks\":0,\"full_idct_blocks\":0,\"residual_stream_bytes\":0,\"raw_stream_bytes\":{},\"mode_stream_bytes\":0,\"y_sse\":0,\"y_mae_milli\":0,\"y_bad_gt16_per_mille\":0,\"y_bad_gt32_per_mille\":0,\"max_mb_y_sse\":0,\"quality_recovery_used\":false}}",
+    frame_no,
+    frame_bytes,
+    rolling_1s_bytes,
+    reason,
+    SBS_FRAME_BYTES
+  );
+}
+
+fn log_p_frame_stats(
+  frame_no: usize, candidate: &PFrameCandidate, recent_frame_bytes: &[usize],
+) {
+  let rolling_1s_bytes = rolling_window_bytes_after(
+    recent_frame_bytes,
+    candidate.stats.p_frame_bytes,
+  );
+  eprintln!(
+    "{{\"kind\":\"o3yv_frame_stats\",\"frame_no\":{},\"frame_type\":\"p\",\"frame_size_bytes\":{},\"rolling_1s_bytes\":{},\"q_step\":{},\"skip_base_mb\":{},\"copy16_mb\":{},\"copy_vbs_mb\":{},\"base_res_mb\":{},\"raw_mb\":{},\"raw_4x4_blocks\":{},\"dc_only_blocks\":{},\"ac_mask_blocks\":{},\"full_idct_blocks\":{},\"residual_stream_bytes\":{},\"raw_stream_bytes\":{},\"mode_stream_bytes\":{},\"left_base_mv_x\":{},\"left_base_mv_y\":{},\"right_base_mv_x\":{},\"right_base_mv_y\":{},\"y_sse\":{},\"y_mae_milli\":{},\"y_bad_gt16_per_mille\":{},\"y_bad_gt32_per_mille\":{},\"max_mb_y_sse\":{},\"quality_recovery_used\":{}}}",
+    frame_no,
+    candidate.stats.p_frame_bytes,
+    rolling_1s_bytes,
+    candidate.q_step.unwrap_or(-1),
+    candidate.stats.skip_mb,
+    candidate.stats.copy16_mb,
+    candidate.stats.vbs_mb + candidate.stats.vbs_res_mb,
+    candidate.stats.base_res_mb,
+    candidate.stats.raw_mb,
+    candidate.stats.raw_4x4_blocks,
+    candidate.stats.dc_only_blocks,
+    candidate.stats.ac_mask_blocks,
+    candidate.stats.full_idct_blocks,
+    candidate.stats.residual_stream_bytes,
+    candidate.stats.raw_stream_bytes,
+    candidate.stats.mode_stream_bytes,
+    candidate.left_base_mv.x,
+    candidate.left_base_mv.y,
+    candidate.right_base_mv.x,
+    candidate.right_base_mv.y,
+    candidate.quality.y_sse,
+    candidate.quality.y_mae_milli,
+    candidate.quality.y_bad_gt16_per_mille,
+    candidate.quality.y_bad_gt32_per_mille,
+    candidate.quality.max_mb_y_sse,
+    candidate.quality_recovery_used
+  );
+}
+
 fn encode_budgeted_p_frame(
   frame_no: u32, frame: &SbsFrame, reference: &SbsFrame, row_bands: bool,
-  max_p_frame_bytes: usize,
+  max_p_frame_bytes: usize, recent_frame_bytes: &[usize],
 ) -> PFrameCandidate {
   let lossless = encode_p_frame_candidate(
     frame_no,
@@ -339,6 +475,25 @@ fn encode_budgeted_p_frame(
     }
   }
 
+  if harmful_undershoot(&best, recent_frame_bytes) {
+    let recovery = encode_p_frame_candidate(
+      frame_no,
+      frame,
+      reference,
+      row_bands,
+      EncodeMode::QualityRecovery { q_step: QUALITY_RECOVERY_Q_STEP },
+    );
+    if p_frame_satisfies_budget(&recovery.stats, max_p_frame_bytes)
+      && recovery.quality.y_sse < best.quality.y_sse
+      && rolling_window_allows_frame_bytes(
+        recent_frame_bytes,
+        recovery.stats.p_frame_bytes,
+      )
+    {
+      best = recovery;
+    }
+  }
+
   if !p_frame_satisfies_budget(&best.stats, max_p_frame_bytes) {
     eprintln!(
       "warning: frame {frame_no} still exceeds budget after quantization: bytes={} raw_mb={} (limits: bytes<={max_p_frame_bytes}, raw_mb<={MAX_RAW_MB_PER_P_FRAME})",
@@ -357,6 +512,8 @@ fn encode_p_frame_candidate(
     encode_tile(0, &frame.left, &reference.left, row_bands, mode);
   let (right_tile, right_recon, right_stats) =
     encode_tile(1, &frame.right, &reference.right, row_bands, mode);
+  let left_base_mv = left_tile.base_mv;
+  let right_base_mv = right_tile.base_mv;
   let mut bytes = Vec::new();
   write_p_frame(&mut bytes, frame_no, left_tile, right_tile);
 
@@ -364,12 +521,19 @@ fn encode_p_frame_candidate(
   add_stats(&mut stats, &left_stats);
   add_stats(&mut stats, &right_stats);
   stats.p_frame_bytes = bytes.len();
+  let recon = SbsFrame { left: left_recon, right: right_recon };
+  let quality = frame_quality_metrics(frame, &recon);
 
   PFrameCandidate {
     bytes,
-    recon: SbsFrame { left: left_recon, right: right_recon },
+    recon,
     stats,
     mode_name: mode.name(),
+    q_step: mode.q_step(),
+    quality,
+    quality_recovery_used: mode.quality_recovery(),
+    left_base_mv,
+    right_base_mv,
   }
 }
 
@@ -381,12 +545,37 @@ fn p_frame_satisfies_budget(
 }
 
 fn rolling_window_allows_keyframe(recent_frame_bytes: &[usize]) -> bool {
+  rolling_window_allows_frame_bytes(recent_frame_bytes, KEY_RAW_CODED_BYTES)
+}
+
+fn rolling_window_allows_frame_bytes(
+  recent_frame_bytes: &[usize], next_frame_bytes: usize,
+) -> bool {
+  rolling_window_bytes_after(recent_frame_bytes, next_frame_bytes)
+    <= RATE_WINDOW_BYTES
+}
+
+fn rolling_window_bytes_after(
+  recent_frame_bytes: &[usize], next_frame_bytes: usize,
+) -> usize {
   let recent_bytes: usize = recent_frame_bytes
     .iter()
     .rev()
     .take(RATE_WINDOW_FRAMES.saturating_sub(1))
     .sum();
-  recent_bytes + KEY_RAW_CODED_BYTES <= RATE_WINDOW_BYTES
+  recent_bytes + next_frame_bytes
+}
+
+fn harmful_undershoot(
+  candidate: &PFrameCandidate, recent_frame_bytes: &[usize],
+) -> bool {
+  candidate.stats.p_frame_bytes < P_FRAME_SOFT_TARGET_MIN
+    && rolling_window_allows_frame_bytes(
+      recent_frame_bytes,
+      P_FRAME_SOFT_TARGET_MIN,
+    )
+    && candidate.quality.y_mae_milli >= QUALITY_BAD_Y_MAE_MILLI
+    && candidate.quality.y_bad_gt16_per_mille >= QUALITY_BAD_Y_GT16_PER_MILLE
 }
 
 fn scene_change_requires_keyframe(metrics: SceneChangeMetrics) -> bool {
@@ -444,6 +633,71 @@ fn accumulate_scene_eye_metrics(
   }
 }
 
+fn frame_quality_metrics(src: &SbsFrame, recon: &SbsFrame) -> QualityMetrics {
+  let mut metrics = QualityMetrics::default();
+  accumulate_quality_eye_metrics(&src.left, &recon.left, &mut metrics);
+  accumulate_quality_eye_metrics(&src.right, &recon.right, &mut metrics);
+  let samples = (EYE_W * EYE_H * 2) as u64;
+
+  let (abs_sum, bad16, bad32, max_mb) =
+    quality_abs_metrics(&src.left, &recon.left, &src.right, &recon.right);
+  metrics.y_mae_milli = ((abs_sum * 1000) / samples) as u32;
+  metrics.y_bad_gt16_per_mille = ((bad16 * 1000) / samples) as u32;
+  metrics.y_bad_gt32_per_mille = ((bad32 * 1000) / samples) as u32;
+  metrics.max_mb_y_sse = max_mb;
+  metrics
+}
+
+fn accumulate_quality_eye_metrics(
+  src: &EyeFrame, recon: &EyeFrame, metrics: &mut QualityMetrics,
+) {
+  for (a, b) in src.y.iter().zip(&recon.y) {
+    let delta = (*a as i32 - *b as i32).unsigned_abs() as u64;
+    metrics.y_sse += delta * delta;
+  }
+}
+
+fn quality_abs_metrics(
+  left_src: &EyeFrame, left_recon: &EyeFrame, right_src: &EyeFrame,
+  right_recon: &EyeFrame,
+) -> (u64, u64, u64, u64) {
+  let mut abs_sum = 0u64;
+  let mut bad16 = 0u64;
+  let mut bad32 = 0u64;
+  let mut max_mb = 0u64;
+  for (src, recon) in [(left_src, left_recon), (right_src, right_recon)] {
+    for (a, b) in src.y.iter().zip(&recon.y) {
+      let delta = (*a as i32 - *b as i32).unsigned_abs() as u64;
+      abs_sum += delta;
+      if delta > 16 {
+        bad16 += 1;
+      }
+      if delta > 32 {
+        bad32 += 1;
+      }
+    }
+    for mb_index in 0..(MB_W * MB_H) {
+      max_mb = max_mb.max(mb_y_sse(src, recon, mb_index));
+    }
+  }
+  (abs_sum, bad16, bad32, max_mb)
+}
+
+fn mb_y_sse(src: &EyeFrame, recon: &EyeFrame, mb_index: usize) -> u64 {
+  let mb_x = mb_index % MB_W;
+  let mb_y = mb_index / MB_W;
+  let mut sse = 0u64;
+  for row in 0..16 {
+    for col in 0..16 {
+      let idx = (mb_y * 16 + row) * EYE_W + mb_x * 16 + col;
+      let delta =
+        (src.y[idx] as i32 - recon.y[idx] as i32).unsigned_abs() as u64;
+      sse += delta * delta;
+    }
+  }
+  sse
+}
+
 fn encode_tile(
   tile_id: u8, src: &EyeFrame, reference: &EyeFrame, row_bands: bool,
   mode: EncodeMode,
@@ -494,6 +748,9 @@ fn encode_tile(
 
     flush_skip(&mut mode_stream, &mut skip_run);
     mode_stream.push(0);
+    stats.mode_stream_bytes += mode_stream.len();
+    stats.residual_stream_bytes += residual_stream.len();
+    stats.raw_stream_bytes += raw_stream.len();
 
     let fragment = EncodedFragment {
       tile_id,
@@ -542,15 +799,17 @@ fn choose_mb(
   let mut candidates = Vec::new();
   let mut raw = Vec::with_capacity(384);
   read_raw_mb(src, mb_index, &mut raw);
-  if mode == EncodeMode::Lossless {
+  if mode == EncodeMode::Lossless || mode.quality_recovery() {
     candidates.push(MbChoice {
       mode: MODE_RAW_MB,
       mvs: Vec::new(),
       residual: Vec::new(),
       recon: raw.clone(),
-      cost: 1 + raw.len() + 24,
+      cost: 1 + raw.len() + if mode.quality_recovery() { 24 } else { 0 },
       raw,
       segment_id: 3,
+      residual_stats: ResidualStats::default(),
+      distortion: 0,
     });
   }
 
@@ -575,6 +834,8 @@ fn choose_mb(
       recon: raw_mb_bytes(&pred, mb_index),
       cost: 1 + 2 + 2,
       segment_id: 1,
+      residual_stats: ResidualStats::default(),
+      distortion: 0,
     });
   }
 
@@ -616,6 +877,8 @@ fn choose_mb(
         recon: raw_mb_bytes(&pred, mb_index),
         cost: 1 + mv_bytes + 3,
         segment_id: 1,
+        residual_stats: ResidualStats::default(),
+        distortion: 0,
       });
     } else {
       add_residual_candidates(
@@ -643,6 +906,7 @@ fn add_residual_candidates(
   match mode {
     EncodeMode::Lossless => {
       if let Some(residual) = build_lossless_residual(src, pred, mb_index) {
+        let residual_stats = residual_stats(&residual);
         candidates.push(MbChoice {
           mode: mode_id,
           mvs,
@@ -654,12 +918,20 @@ fn add_residual_candidates(
           raw: Vec::new(),
           recon: raw_mb_bytes(src, mb_index),
           segment_id: 2,
+          residual_stats,
+          distortion: 0,
         });
       }
     }
-    EncodeMode::Budget { q_step } => {
+    EncodeMode::Budget { q_step } | EncodeMode::QualityRecovery { q_step } => {
       for (segment_id, segment_q) in aq_steps(q_step) {
-        let residual = build_lossy_dc_residual(src, pred, mb_index, segment_q);
+        let residual = build_lossy_residual(
+          src,
+          pred,
+          mb_index,
+          segment_q,
+          mode.quality_recovery(),
+        );
         candidates.push(MbChoice {
           mode: mode_id,
           mvs: mvs.clone(),
@@ -668,10 +940,12 @@ fn add_residual_candidates(
             + residual.bytes.len()
             + residual_decode_cost(&residual.bytes)
             + residual.distortion / 96,
+          residual_stats: residual.stats,
           residual: residual.bytes,
           raw: Vec::new(),
           recon: residual.recon,
           segment_id,
+          distortion: residual.distortion,
         });
       }
     }
@@ -1040,20 +1314,23 @@ struct LossyResidual {
   bytes: Vec<u8>,
   recon: Vec<u8>,
   distortion: usize,
+  stats: ResidualStats,
 }
 
-fn build_lossy_dc_residual(
+fn build_lossy_residual(
   src: &EyeFrame, pred: &EyeFrame, mb_index: usize, q_step: i16,
+  quality_recovery: bool,
 ) -> LossyResidual {
   let mut recon_eye = pred.clone();
   let mut mask = 0u32;
   let mut payloads: Vec<Vec<u8>> = Vec::new();
   let mut distortion = 0usize;
+  let mut stats = ResidualStats::default();
 
   for block in 0..16 {
     let bx = (mb_index % MB_W) * 16 + (block % 4) * 4;
     let by = (mb_index / MB_W) * 16 + (block / 4) * 4;
-    if let Some(payload) = lossy_dc_block_payload(
+    if let Some(payload) = lossy_block_payload(
       &src.y,
       &pred.y,
       &mut recon_eye.y,
@@ -1061,7 +1338,9 @@ fn build_lossy_dc_residual(
       bx,
       by,
       q_step,
+      quality_recovery,
       &mut distortion,
+      &mut stats,
     ) {
       mask |= 1 << block;
       payloads.push(payload);
@@ -1070,7 +1349,7 @@ fn build_lossy_dc_residual(
   for block in 0..4 {
     let bx = (mb_index % MB_W) * 8 + (block % 2) * 4;
     let by = (mb_index / MB_W) * 8 + (block / 2) * 4;
-    if let Some(payload) = lossy_dc_block_payload(
+    if let Some(payload) = lossy_block_payload(
       &src.cb,
       &pred.cb,
       &mut recon_eye.cb,
@@ -1078,7 +1357,9 @@ fn build_lossy_dc_residual(
       bx,
       by,
       q_step,
+      quality_recovery,
       &mut distortion,
+      &mut stats,
     ) {
       mask |= 1 << (16 + block);
       payloads.push(payload);
@@ -1087,7 +1368,7 @@ fn build_lossy_dc_residual(
   for block in 0..4 {
     let bx = (mb_index % MB_W) * 8 + (block % 2) * 4;
     let by = (mb_index / MB_W) * 8 + (block / 2) * 4;
-    if let Some(payload) = lossy_dc_block_payload(
+    if let Some(payload) = lossy_block_payload(
       &src.cr,
       &pred.cr,
       &mut recon_eye.cr,
@@ -1095,7 +1376,9 @@ fn build_lossy_dc_residual(
       bx,
       by,
       q_step,
+      quality_recovery,
       &mut distortion,
+      &mut stats,
     ) {
       mask |= 1 << (20 + block);
       payloads.push(payload);
@@ -1112,12 +1395,14 @@ fn build_lossy_dc_residual(
     bytes,
     recon: raw_mb_bytes(&recon_eye, mb_index),
     distortion,
+    stats,
   }
 }
 
-fn lossy_dc_block_payload(
+fn lossy_block_payload(
   src: &[u8], pred: &[u8], recon: &mut [u8], stride: usize, x: usize,
-  y: usize, q_step: i16, distortion: &mut usize,
+  y: usize, q_step: i16, quality_recovery: bool, distortion: &mut usize,
+  stats: &mut ResidualStats,
 ) -> Option<Vec<u8>> {
   let mut sum = 0i32;
   for row in 0..4 {
@@ -1129,20 +1414,44 @@ fn lossy_dc_block_payload(
 
   let avg = round_div_i32(sum, 16) as i16;
   let delta = quantize_delta(avg, q_step);
+  let mut dc_values = [0u8; 16];
+  let mut dc_distortion = 0usize;
   for row in 0..4 {
     for col in 0..4 {
       let idx = (y + row) * stride + x + col;
       let value = (pred[idx] as i16 + delta).clamp(0, 255) as u8;
-      recon[idx] = value;
+      dc_values[row * 4 + col] = value;
       let err = src[idx] as i32 - value as i32;
-      *distortion += (err * err) as usize;
+      dc_distortion += (err * err) as usize;
     }
   }
+
+  if quality_recovery && dc_distortion >= QUALITY_RAW4X4_SSE_THRESHOLD {
+    let mut out = Vec::with_capacity(17);
+    out.push(TAG_RAW_4X4);
+    for row in 0..4 {
+      let src_off = (y + row) * stride + x;
+      out.extend_from_slice(&src[src_off..src_off + 4]);
+      let dst_off = (y + row) * stride + x;
+      recon[dst_off..dst_off + 4].copy_from_slice(&src[src_off..src_off + 4]);
+    }
+    stats.raw_4x4_blocks += 1;
+    return Some(out);
+  }
+
+  for row in 0..4 {
+    for col in 0..4 {
+      let idx = (y + row) * stride + x + col;
+      recon[idx] = dc_values[row * 4 + col];
+    }
+  }
+  *distortion += dc_distortion;
 
   if delta == 0 {
     return None;
   }
 
+  stats.dc_only_blocks += 1;
   Some(dc_payload(delta))
 }
 
@@ -1176,6 +1485,63 @@ fn dc_payload(delta: i16) -> Vec<u8> {
     out.extend_from_slice(&qdc.to_le_bytes());
   }
   out
+}
+
+fn residual_stats(residual: &[u8]) -> ResidualStats {
+  let mut stats = ResidualStats::default();
+  if residual.len() < 4 {
+    return stats;
+  }
+
+  let mask =
+    u32::from_le_bytes([residual[0], residual[1], residual[2], residual[3]]);
+  let mut pos = 4usize;
+  for block in 0..24 {
+    if (mask & (1 << block)) == 0 {
+      continue;
+    }
+    let Some(&tag) = residual.get(pos) else {
+      break;
+    };
+    pos += 1;
+    match tag & 0xc0 {
+      0x00 => {
+        stats.dc_only_blocks += 1;
+        pos += 1;
+      }
+      0x40 => {
+        stats.dc_only_blocks += 1;
+        pos += 2;
+      }
+      0x80 => {
+        stats.ac_mask_blocks += 1;
+        stats.full_idct_blocks += 1;
+        if pos + 2 > residual.len() {
+          break;
+        }
+        let nz_mask = u16::from_le_bytes([residual[pos], residual[pos + 1]]);
+        pos += 2 + nz_mask.count_ones() as usize;
+      }
+      0xc0 if (tag & 0x20) == 0 => {
+        stats.ac_mask_blocks += 1;
+        stats.full_idct_blocks += 1;
+        if pos + 2 > residual.len() {
+          break;
+        }
+        let nz_mask = u16::from_le_bytes([residual[pos], residual[pos + 1]]);
+        pos += 2 + nz_mask.count_ones() as usize * 2;
+      }
+      0xc0 => {
+        stats.raw_4x4_blocks += 1;
+        pos += 16;
+      }
+      _ => {}
+    }
+    if pos > residual.len() {
+      break;
+    }
+  }
+  stats
 }
 
 fn residual_decode_cost(residual: &[u8]) -> usize {
@@ -1243,6 +1609,14 @@ fn add_stats(total: &mut FrameStats, frame: &FrameStats) {
   total.vbs_res_mb += frame.vbs_res_mb;
   total.base_res_mb += frame.base_res_mb;
   total.raw_mb += frame.raw_mb;
+  total.raw_4x4_blocks += frame.raw_4x4_blocks;
+  total.dc_only_blocks += frame.dc_only_blocks;
+  total.ac_mask_blocks += frame.ac_mask_blocks;
+  total.full_idct_blocks += frame.full_idct_blocks;
+  total.mode_stream_bytes += frame.mode_stream_bytes;
+  total.residual_stream_bytes += frame.residual_stream_bytes;
+  total.raw_stream_bytes += frame.raw_stream_bytes;
+  total.distortion += frame.distortion;
 }
 
 #[cfg(test)]
@@ -1309,7 +1683,7 @@ mod tests {
     let first = solid_frame(40, 90, 150);
     let second = noisy_frame();
     let candidate =
-      encode_budgeted_p_frame(1, &second, &first, true, 64 * 1024);
+      encode_budgeted_p_frame(1, &second, &first, true, 64 * 1024, &[]);
     assert!(candidate.stats.p_frame_bytes <= 64 * 1024);
     assert_eq!(candidate.stats.raw_mb, 0);
 
