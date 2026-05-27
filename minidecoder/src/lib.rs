@@ -24,6 +24,9 @@ pub const LAZY_BASE_COPY_MAX_MB_PER_TILE: usize = 96;
 pub const TILE_FLAG_LAZY_BASE_COPY: u16 = 0x0001;
 const SUPPORTED_TILE_FLAGS: u16 = TILE_FLAG_LAZY_BASE_COPY;
 const REFERENCE_REUSE_FRAME_PAYLOAD_MAX: usize = 512;
+const DC_CLIP_DELTA_MIN: i32 = -16;
+const DC_CLIP_DELTA_MAX: i32 = 16;
+const DC_CLIP_TABLE: [[u8; 256]; 33] = build_dc_clip_table();
 
 pub const FRAME_TYPE_KEY_RAW: u8 = 0;
 pub const FRAME_TYPE_P: u8 = 2;
@@ -1257,10 +1260,26 @@ fn add_dc_block(
   }
 
   let base = y * stride + x;
-  add_dc_row4(plane, base, delta);
-  add_dc_row4(plane, base + stride, delta);
-  add_dc_row4(plane, base + stride * 2, delta);
-  add_dc_row4(plane, base + stride * 3, delta);
+  if (DC_CLIP_DELTA_MIN..=DC_CLIP_DELTA_MAX).contains(&delta) {
+    let table = &DC_CLIP_TABLE[(delta - DC_CLIP_DELTA_MIN) as usize];
+    add_dc_row4_table(plane, base, table);
+    add_dc_row4_table(plane, base + stride, table);
+    add_dc_row4_table(plane, base + stride * 2, table);
+    add_dc_row4_table(plane, base + stride * 3, table);
+  } else {
+    add_dc_row4(plane, base, delta);
+    add_dc_row4(plane, base + stride, delta);
+    add_dc_row4(plane, base + stride * 2, delta);
+    add_dc_row4(plane, base + stride * 3, delta);
+  }
+}
+
+#[inline(always)]
+fn add_dc_row4_table(plane: &mut [u8], idx: usize, table: &[u8; 256]) {
+  plane[idx] = table[plane[idx] as usize];
+  plane[idx + 1] = table[plane[idx + 1] as usize];
+  plane[idx + 2] = table[plane[idx + 2] as usize];
+  plane[idx + 3] = table[plane[idx + 3] as usize];
 }
 
 #[inline(always)]
@@ -1727,6 +1746,27 @@ fn clip_u8(v: i32) -> u8 {
   v.clamp(0, 255) as u8
 }
 
+const fn build_dc_clip_table() -> [[u8; 256]; 33] {
+  let mut table = [[0u8; 256]; 33];
+  let mut delta = DC_CLIP_DELTA_MIN;
+  while delta <= DC_CLIP_DELTA_MAX {
+    let mut sample = 0usize;
+    while sample < 256 {
+      let value = sample as i32 + delta;
+      table[(delta - DC_CLIP_DELTA_MIN) as usize][sample] = if value < 0 {
+        0
+      } else if value > 255 {
+        255
+      } else {
+        value as u8
+      };
+      sample += 1;
+    }
+    delta += 1;
+  }
+  table
+}
+
 fn clamp_i32(v: i32, lo: i32, hi: i32) -> i32 {
   v.max(lo).min(hi)
 }
@@ -2152,6 +2192,16 @@ mod tests {
         [coeff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       );
       assert_eq!(dc_plane, idct_plane);
+    }
+  }
+
+  #[test]
+  fn dc_clip_table_matches_saturating_clip() {
+    for delta in DC_CLIP_DELTA_MIN..=DC_CLIP_DELTA_MAX {
+      let table = &DC_CLIP_TABLE[(delta - DC_CLIP_DELTA_MIN) as usize];
+      for sample in 0..=255 {
+        assert_eq!(table[sample], clip_u8(sample as i32 + delta));
+      }
     }
   }
 
