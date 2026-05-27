@@ -23,6 +23,7 @@ const FRAGMENT_HEADER_SIZE: usize = 28;
 pub const LAZY_BASE_COPY_MAX_MB_PER_TILE: usize = 96;
 pub const TILE_FLAG_LAZY_BASE_COPY: u16 = 0x0001;
 const SUPPORTED_TILE_FLAGS: u16 = TILE_FLAG_LAZY_BASE_COPY;
+const REFERENCE_REUSE_FRAME_PAYLOAD_MAX: usize = 512;
 
 pub const FRAME_TYPE_KEY_RAW: u8 = 0;
 pub const FRAME_TYPE_P: u8 = 2;
@@ -388,6 +389,17 @@ where
             "P-frame cannot appear before a reference frame".into(),
           )
         })?;
+        if frame_size <= REFERENCE_REUSE_FRAME_PAYLOAD_MAX
+          && p_payload_reuses_reference(
+            &bytes[payload_start..payload_end],
+            tile_count,
+          )
+        {
+          r.pos = payload_end;
+          on_frame(DecodedFrameRef { frame_no, frame_type, frame: reference });
+          frame_count += 1;
+          continue;
+        }
         let mut pr = Reader::new(&bytes[payload_start..payload_end]);
         for _ in 0..2 {
           decode_tile(&mut pr, reference, &mut current)?;
@@ -618,6 +630,148 @@ fn decode_tile(
     return Err(Error::Invalid("unconsumed tile payload".into()));
   }
   Ok(())
+}
+
+#[inline(never)]
+fn p_payload_reuses_reference(payload: &[u8], tile_count: u8) -> bool {
+  let mut r = Reader::new(payload);
+  for _ in 0..tile_count {
+    let Some(identity) = tile_reuses_reference(&mut r) else {
+      return false;
+    };
+    if !identity {
+      return false;
+    }
+  }
+  r.remaining() == 0
+}
+
+fn tile_reuses_reference(r: &mut Reader<'_>) -> Option<bool> {
+  if r.remaining() < TILE_HEADER_SIZE {
+    return None;
+  }
+  let tile_id = r.u8().ok()?;
+  let mb_x = r.u8().ok()?;
+  let mb_y = r.u8().ok()?;
+  let mb_w = r.u8().ok()?;
+  let mb_h = r.u8().ok()?;
+  let base_mv = Mv { x: r.i8().ok()?, y: r.i8().ok()? };
+  let q_y = r.u8().ok()?;
+  let q_uv = r.u8().ok()?;
+  let segment_count = r.u8().ok()?;
+  let fragment_count = r.u8().ok()?;
+  let tile_flags = r.u16().ok()?;
+  let payload_size = r.u32().ok()? as usize;
+
+  if tile_id > 1
+    || mb_x != 0
+    || mb_y != 0
+    || mb_w as usize != MB_W
+    || mb_h as usize != MB_H
+    || q_y > 127
+    || q_uv > 127
+    || !(1..=4).contains(&segment_count)
+    || fragment_count == 0
+    || (tile_flags & !SUPPORTED_TILE_FLAGS) != 0
+  {
+    return None;
+  }
+  if base_mv != Mv::ZERO {
+    return Some(false);
+  }
+
+  let payload = r.take(payload_size).ok()?;
+  Some(tile_payload_reuses_reference(
+    payload,
+    tile_id,
+    segment_count,
+    fragment_count,
+  ))
+}
+
+fn tile_payload_reuses_reference(
+  payload: &[u8], tile_id: u8, segment_count: u8, fragment_count: u8,
+) -> bool {
+  let mut r = Reader::new(payload);
+  for _ in 0..fragment_count {
+    let Some(identity) =
+      fragment_payload_reuses_reference(&mut r, tile_id, segment_count)
+    else {
+      return false;
+    };
+    if !identity {
+      return false;
+    }
+  }
+  r.remaining() == 0
+}
+
+fn fragment_payload_reuses_reference(
+  r: &mut Reader<'_>, tile_id: u8, segment_count: u8,
+) -> Option<bool> {
+  if r.remaining() < FRAGMENT_HEADER_SIZE {
+    return None;
+  }
+  let frag_tile_id = r.u8().ok()?;
+  let row_start = r.u8().ok()?;
+  let row_count = r.u8().ok()?;
+  let flags = r.u8().ok()?;
+  let start_mb = r.u16().ok()? as usize;
+  let mb_count = r.u16().ok()? as usize;
+  let segment_map_size = r.u32().ok()? as usize;
+  let mode_size = r.u32().ok()? as usize;
+  let residual_size = r.u32().ok()? as usize;
+  let raw_size = r.u32().ok()? as usize;
+  let crc = r.u32().ok()?;
+
+  if residual_size != 0 || raw_size != 0 {
+    return Some(false);
+  }
+
+  validate_fragment_header(
+    frag_tile_id,
+    tile_id,
+    flags,
+    crc,
+    row_start,
+    row_count,
+    start_mb,
+    mb_count,
+  )
+  .ok()?;
+
+  let segment_map = r.take(segment_map_size).ok()?;
+  validate_segment_map(segment_map, segment_count, mb_count).ok()?;
+  let mode_stream = r.take(mode_size).ok()?;
+  let residual_stream = r.take(residual_size).ok()?;
+  let raw_stream = r.take(raw_size).ok()?;
+
+  Some(
+    residual_stream.is_empty()
+      && raw_stream.is_empty()
+      && mode_stream_is_all_skip(mode_stream, mb_count),
+  )
+}
+
+fn mode_stream_is_all_skip(mode_stream: &[u8], mb_count: usize) -> bool {
+  let mut r = Reader::new(mode_stream);
+  let mut described = 0usize;
+  while described < mb_count {
+    let Ok(op) = r.u8() else {
+      return false;
+    };
+    if op == 0 || op > 0x7f {
+      return false;
+    }
+    described += op as usize;
+    if described > mb_count {
+      return false;
+    }
+  }
+  if r.remaining() == 1 && r.bytes[r.pos] == 0 {
+    r.pos += 1;
+  }
+  r.remaining() == 0
 }
 
 #[derive(Clone, Copy)]
@@ -1756,6 +1910,20 @@ mod tests {
     bytes
   }
 
+  fn all_skip_tile(tile_id: u8) -> EncodedTile {
+    EncodedTile {
+      tile_id,
+      base_mv: Mv::ZERO,
+      segment_count: 1,
+      fragments: vec![EncodedFragment::full_eye(
+        tile_id,
+        vec![0x7f, 0x7f, 0x79, 0],
+        vec![],
+        vec![],
+      )],
+    }
+  }
+
   #[test]
   fn key_raw_round_trips() {
     let frame = patterned_frame(9);
@@ -1771,32 +1939,50 @@ mod tests {
     let mut bytes = Vec::new();
     write_file_header(&mut bytes, 2);
     write_key_raw_frame(&mut bytes, 0, &key);
+    write_p_frame(&mut bytes, 1, all_skip_tile(0), all_skip_tile(1));
+    let frames = decode_stream(&bytes).unwrap();
+    assert_eq!(frames[0], key);
+    assert_eq!(frames[1], key);
+  }
+
+  #[test]
+  fn skipped_p_frame_keeps_reference_for_following_p() {
+    let key = patterned_frame(1);
+    let mut bytes = Vec::new();
+    write_file_header(&mut bytes, 3);
+    write_key_raw_frame(&mut bytes, 0, &key);
+    write_p_frame(&mut bytes, 1, all_skip_tile(0), all_skip_tile(1));
+
+    let mut residual = Vec::new();
+    put_u32(&mut residual, 0x0000_0001);
+    residual.push(TAG_DC_ONLY_S8);
+    residual.push(5 * 8);
     let left = EncodedTile {
       tile_id: 0,
       base_mv: Mv::ZERO,
       segment_count: 1,
       fragments: vec![EncodedFragment::full_eye(
         0,
-        vec![0x7f, 0x7f, 0x79, 0],
-        vec![],
-        vec![],
-      )],
-    };
-    let right = EncodedTile {
-      tile_id: 1,
-      base_mv: Mv::ZERO,
-      segment_count: 1,
-      fragments: vec![EncodedFragment::full_eye(
-        1,
-        vec![0x7f, 0x7f, 0x79, 0],
-        vec![],
+        vec![0x80 | MODE_BASE_RES, 0x7f, 0x7f, 0x78, 0],
+        residual,
         vec![],
       )],
     };
-    write_p_frame(&mut bytes, 1, left, right);
+    write_p_frame(&mut bytes, 2, left, all_skip_tile(1));
+
     let frames = decode_stream(&bytes).unwrap();
-    assert_eq!(frames[0], key);
+    let mut expected = key.clone();
+    add_dc_block(&mut expected.left.y, EYE_W, 0, 0, 5 * 8);
+
     assert_eq!(frames[1], key);
+    assert_eq!(frames[2], expected);
+  }
+
+  #[test]
+  fn all_skip_tile_with_residual_bytes_is_rejected() {
+    let bytes =
+      p_with_tiles(vec![0x7f, 0x7f, 0x79, 0], vec![0, 0, 0, 0], vec![]);
+    assert!(decode_stream(&bytes).is_err());
   }
 
   #[test]
