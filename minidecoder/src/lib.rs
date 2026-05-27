@@ -1250,9 +1250,21 @@ fn copy_rect(
   bw: usize, bh: usize, mv_x: i32, mv_y: i32,
 ) {
   if mv_x == 0 && mv_y == 0 {
-    for row in 0..bh {
-      let off = (dst_y + row) * w + dst_x;
-      dst[off..off + bw].copy_from_slice(&src[off..off + bw]);
+    if bw == 16 {
+      for row in 0..bh {
+        let off = (dst_y + row) * w + dst_x;
+        copy_16(&mut dst[off..off + 16], &src[off..off + 16]);
+      }
+    } else if bw == 8 {
+      for row in 0..bh {
+        let off = (dst_y + row) * w + dst_x;
+        copy_8(&mut dst[off..off + 8], &src[off..off + 8]);
+      }
+    } else {
+      for row in 0..bh {
+        let off = (dst_y + row) * w + dst_x;
+        dst[off..off + bw].copy_from_slice(&src[off..off + bw]);
+      }
     }
     return;
   }
