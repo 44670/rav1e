@@ -1202,6 +1202,25 @@ fn copy_rect(
     return;
   }
 
+  let src_x = dst_x as i32 + mv_x;
+  let src_y = dst_y as i32 + mv_y;
+  if src_x >= 0
+    && src_y >= 0
+    && src_x as usize + bw <= w
+    && src_y as usize + bh <= h
+  {
+    let src_x = src_x as usize;
+    let src_y = src_y as usize;
+    for row in 0..bh {
+      let dst_off = (dst_y + row) * w + dst_x;
+      let src_off = (src_y + row) * w + src_x;
+      for col in 0..bw {
+        dst[dst_off + col] = src[src_off + col];
+      }
+    }
+    return;
+  }
+
   for row in 0..bh {
     for col in 0..bw {
       let x = dst_x + col;
