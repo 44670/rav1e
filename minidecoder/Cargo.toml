@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 stats = []
+stress = []
 
 [lib]
 name = "minidecoder"
@@ -13,6 +14,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "minidecoder"
 path = "src/main.rs"
+
+[[bin]]
+name = "o3yv-stress"
+path = "src/bin/o3yv-stress.rs"
+required-features = ["stress"]
 
 [dependencies]
 image = { version = "0.25.0", default-features = false, features = ["png"] }
