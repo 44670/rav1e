@@ -24,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   if options.stats {
     print_stream_stats(&collect_stream_stats(&bytes)?)?;
     if options.bench_iters.is_none()
+      && options.bench_frame_iters.is_none()
       && options.output.is_none()
       && options.png_dir.is_none()
     {
@@ -38,6 +39,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       );
     }
     run_bench(&bytes, iterations)?;
+    return Ok(());
+  }
+
+  if let Some(iterations) = options.bench_frame_iters {
+    if options.output.is_some() || options.png_dir.is_some() {
+      return Err(
+        "--bench-frames cannot be combined with output.yuv or --png-dir"
+          .into(),
+      );
+    }
+    run_frame_bench(&bytes, iterations)?;
     return Ok(());
   }
 
@@ -80,6 +92,7 @@ struct Options {
   output: Option<String>,
   png_dir: Option<std::path::PathBuf>,
   bench_iters: Option<usize>,
+  bench_frame_iters: Option<usize>,
   stats: bool,
 }
 
@@ -88,6 +101,7 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
   let mut output = None;
   let mut png_dir = None;
   let mut bench_iters = None;
+  let mut bench_frame_iters = None;
   let mut stats = false;
 
   let mut args = env::args().skip(1);
@@ -98,6 +112,9 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
           Some(args.next().ok_or("--png-dir requires a directory")?.into());
       }
       "--bench" => {
+        if bench_frame_iters.is_some() {
+          return Err("--bench cannot be combined with --bench-frames".into());
+        }
         let iterations = args
           .next()
           .ok_or("--bench requires an iteration count")?
@@ -106,6 +123,21 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
           return Err("--bench iteration count must be positive".into());
         }
         bench_iters = Some(iterations);
+      }
+      "--bench-frames" => {
+        if bench_iters.is_some() {
+          return Err("--bench-frames cannot be combined with --bench".into());
+        }
+        let iterations = args
+          .next()
+          .ok_or("--bench-frames requires an iteration count")?
+          .parse::<usize>()?;
+        if iterations == 0 {
+          return Err(
+            "--bench-frames iteration count must be positive".into(),
+          );
+        }
+        bench_frame_iters = Some(iterations);
       }
       "--stats" => {
         stats = true;
@@ -125,13 +157,13 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
     return Err("missing input file".into());
   };
 
-  Ok(Options { input, output, png_dir, bench_iters, stats })
+  Ok(Options { input, output, png_dir, bench_iters, bench_frame_iters, stats })
 }
 
 fn print_usage() {
   let stats = if cfg!(feature = "stats") { " [--stats]" } else { "" };
   eprintln!(
-    "usage: minidecoder <input.o3yv> [output.yuv] [--png-dir DIR] [--bench N]{stats}"
+    "usage: minidecoder <input.o3yv> [output.yuv] [--png-dir DIR] [--bench N] [--bench-frames N]{stats}"
   );
 }
 
@@ -184,6 +216,106 @@ fn run_bench(
   Ok(())
 }
 
+fn run_frame_bench(
+  bytes: &[u8], iterations: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+  let mut frame_nos = Vec::new();
+  let mut frame_types = Vec::new();
+  let mut times_by_frame: Vec<Vec<Duration>> = Vec::new();
+  let mut frames_per_iter = None;
+
+  for iter in 0..iterations {
+    let mut index = 0usize;
+    let mut last = Instant::now();
+    let frames = decode_stream_for_each(bytes, |decoded| {
+      let now = Instant::now();
+      let elapsed = now.duration_since(last);
+      last = now;
+
+      if iter == 0 {
+        frame_nos.push(decoded.frame_no);
+        frame_types.push(decoded.frame_type);
+        times_by_frame.push(Vec::with_capacity(iterations));
+      } else {
+        debug_assert_eq!(frame_nos[index], decoded.frame_no);
+        debug_assert_eq!(frame_types[index], decoded.frame_type);
+      }
+      times_by_frame[index].push(elapsed);
+      index += 1;
+    })?;
+
+    if index != frames {
+      return Err("decoded frame callback count mismatch".into());
+    }
+    if let Some(expected) = frames_per_iter {
+      if frames != expected {
+        return Err(
+          "decoded frame count changed across bench iterations".into(),
+        );
+      }
+    } else {
+      frames_per_iter = Some(frames);
+    }
+  }
+
+  let frames = frames_per_iter.unwrap_or(0);
+  if frames == 0 {
+    return Err("cannot benchmark an empty stream".into());
+  }
+
+  let mut summaries = Vec::with_capacity(frames);
+  for index in 0..frames {
+    let samples = &mut times_by_frame[index];
+    samples.sort_unstable();
+    let mean = mean_duration(samples);
+    let min = samples[0];
+    let median = percentile_duration(samples, 50);
+    let p95 = percentile_duration(samples, 95);
+    let max = samples[samples.len() - 1];
+    summaries.push(FrameBenchSummary {
+      index,
+      frame_no: frame_nos[index],
+      frame_type: frame_types[index],
+      mean,
+      min,
+      median,
+      p95,
+      max,
+    });
+  }
+
+  summaries.sort_by_key(|summary| std::cmp::Reverse(summary.median));
+  let report_count = summaries.len().min(10);
+  eprintln!("bench_frame_iterations={iterations}");
+  eprintln!("frames_per_iteration={frames}");
+  eprintln!("frame_ms_top_by_median count={report_count}");
+  for summary in summaries.iter().take(report_count) {
+    eprintln!(
+      "frame index={} no={} type={} mean={:.3} min={:.3} median={:.3} p95={:.3} max={:.3}",
+      summary.index,
+      summary.frame_no,
+      png_frame_kind(summary.frame_type)?,
+      ms(summary.mean),
+      ms(summary.min),
+      ms(summary.median),
+      ms(summary.p95),
+      ms(summary.max)
+    );
+  }
+  Ok(())
+}
+
+struct FrameBenchSummary {
+  index: usize,
+  frame_no: u32,
+  frame_type: u8,
+  mean: Duration,
+  min: Duration,
+  median: Duration,
+  p95: Duration,
+  max: Duration,
+}
+
 fn mean_duration(times: &[Duration]) -> Duration {
   let total_secs = times.iter().map(Duration::as_secs_f64).sum::<f64>();
   Duration::from_secs_f64(total_secs / times.len() as f64)
@@ -197,6 +329,10 @@ fn percentile_duration(times: &[Duration], percentile: usize) -> Duration {
 
 fn ms_per_frame(duration: Duration, frames: usize) -> f64 {
   duration.as_secs_f64() * 1000.0 / frames as f64
+}
+
+fn ms(duration: Duration) -> f64 {
+  duration.as_secs_f64() * 1000.0
 }
 
 #[cfg(feature = "stats")]
