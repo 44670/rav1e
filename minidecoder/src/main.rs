@@ -2,7 +2,7 @@
 use image::{Rgb, RgbImage};
 use minidecoder::{
   decode_stream_for_each, decode_stream_with_metadata, StreamDecoder,
-  FRAME_TYPE_KEY_RAW, FRAME_TYPE_P, SBS_FRAME_BYTES,
+  EYE_FRAME_BYTES, FRAME_TYPE_KEY_RAW, FRAME_TYPE_P, SBS_FRAME_BYTES,
 };
 #[cfg(feature = "png")]
 use minidecoder::{SbsFrame, CHROMA_W, EYE_H, EYE_W, VISIBLE_H, VISIBLE_W};
@@ -41,6 +41,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       );
     }
     run_bench(&bytes, iterations)?;
+    return Ok(());
+  }
+
+  if let Some(iterations) = options.bench_output_iters {
+    if options.output.is_some() || options.png_dir.is_some() {
+      return Err(
+        "--bench-output cannot be combined with output.yuv or --png-dir"
+          .into(),
+      );
+    }
+    run_output_bench(&bytes, iterations)?;
     return Ok(());
   }
 
@@ -104,6 +115,7 @@ struct Options {
   output: Option<String>,
   png_dir: Option<std::path::PathBuf>,
   bench_iters: Option<usize>,
+  bench_output_iters: Option<usize>,
   bench_frame_iters: Option<usize>,
   stats: bool,
 }
@@ -113,6 +125,7 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
   let mut output = None;
   let mut png_dir = None;
   let mut bench_iters = None;
+  let mut bench_output_iters = None;
   let mut bench_frame_iters = None;
   let mut stats = false;
 
@@ -124,8 +137,11 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
           Some(args.next().ok_or("--png-dir requires a directory")?.into());
       }
       "--bench" => {
-        if bench_frame_iters.is_some() {
-          return Err("--bench cannot be combined with --bench-frames".into());
+        if bench_frame_iters.is_some() || bench_output_iters.is_some() {
+          return Err(
+            "--bench cannot be combined with --bench-output or --bench-frames"
+              .into(),
+          );
         }
         let iterations = args
           .next()
@@ -136,9 +152,30 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
         }
         bench_iters = Some(iterations);
       }
+      "--bench-output" => {
+        if bench_iters.is_some() || bench_frame_iters.is_some() {
+          return Err(
+            "--bench-output cannot be combined with --bench or --bench-frames"
+              .into(),
+          );
+        }
+        let iterations = args
+          .next()
+          .ok_or("--bench-output requires an iteration count")?
+          .parse::<usize>()?;
+        if iterations == 0 {
+          return Err(
+            "--bench-output iteration count must be positive".into(),
+          );
+        }
+        bench_output_iters = Some(iterations);
+      }
       "--bench-frames" => {
-        if bench_iters.is_some() {
-          return Err("--bench-frames cannot be combined with --bench".into());
+        if bench_iters.is_some() || bench_output_iters.is_some() {
+          return Err(
+            "--bench-frames cannot be combined with --bench or --bench-output"
+              .into(),
+          );
         }
         let iterations = args
           .next()
@@ -169,14 +206,22 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
     return Err("missing input file".into());
   };
 
-  Ok(Options { input, output, png_dir, bench_iters, bench_frame_iters, stats })
+  Ok(Options {
+    input,
+    output,
+    png_dir,
+    bench_iters,
+    bench_output_iters,
+    bench_frame_iters,
+    stats,
+  })
 }
 
 fn print_usage() {
   let stats = if cfg!(feature = "stats") { " [--stats]" } else { "" };
   let png = if cfg!(feature = "png") { " [--png-dir DIR]" } else { "" };
   eprintln!(
-    "usage: minidecoder <input.o3yv> [output.yuv]{png} [--bench N] [--bench-frames N]{stats}"
+    "usage: minidecoder <input.o3yv> [output.yuv]{png} [--bench N] [--bench-output N] [--bench-frames N]{stats}"
   );
 }
 
@@ -224,6 +269,72 @@ fn run_bench(
   eprintln!("frames_per_iteration={frames}");
   eprintln!(
     "ms_per_frame mean={:.3} min={:.3} median={:.3} p95={:.3} p99={:.3} max={:.3}",
+    ms_per_frame(mean, frames),
+    ms_per_frame(min, frames),
+    ms_per_frame(median, frames),
+    ms_per_frame(p95, frames),
+    ms_per_frame(p99, frames),
+    ms_per_frame(max, frames),
+  );
+  Ok(())
+}
+
+fn run_output_bench(
+  bytes: &[u8], iterations: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+  let mut times = Vec::with_capacity(iterations);
+  let mut frames_per_iter = None;
+  let mut decoder = StreamDecoder::new(bytes)?;
+  let mut left_y2r = vec![0u8; EYE_FRAME_BYTES];
+  let mut right_y2r = vec![0u8; EYE_FRAME_BYTES];
+
+  for _ in 0..iterations {
+    let start = Instant::now();
+    decoder.reset()?;
+    let mut frames = 0usize;
+    while let Some(decoded) = decoder.next_frame()? {
+      decoded
+        .frame
+        .left
+        .write_yuv420p_into(std::hint::black_box(left_y2r.as_mut_slice()))?;
+      decoded
+        .frame
+        .right
+        .write_yuv420p_into(std::hint::black_box(right_y2r.as_mut_slice()))?;
+      std::hint::black_box(left_y2r.as_slice());
+      std::hint::black_box(right_y2r.as_slice());
+      frames += 1;
+    }
+    let elapsed = start.elapsed();
+    if let Some(expected) = frames_per_iter {
+      if frames != expected {
+        return Err(
+          "decoded frame count changed across bench iterations".into(),
+        );
+      }
+    } else {
+      frames_per_iter = Some(frames);
+    }
+    times.push(elapsed);
+  }
+
+  let frames = frames_per_iter.unwrap_or(0);
+  if frames == 0 {
+    return Err("cannot benchmark an empty stream".into());
+  }
+
+  times.sort_unstable();
+  let mean = mean_duration(&times);
+  let min = times[0];
+  let median = percentile_duration(&times, 50);
+  let p95 = percentile_duration(&times, 95);
+  let p99 = percentile_duration(&times, 99);
+  let max = times[times.len() - 1];
+
+  eprintln!("bench_output_iterations={iterations}");
+  eprintln!("frames_per_iteration={frames}");
+  eprintln!(
+    "output_ms_per_frame mean={:.3} min={:.3} median={:.3} p95={:.3} p99={:.3} max={:.3}",
     ms_per_frame(mean, frames),
     ms_per_frame(min, frames),
     ms_per_frame(median, frames),

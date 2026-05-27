@@ -19,6 +19,7 @@ Defaults:
 Default ceilings:
   O3YV_GATE_MAX_P_WORK        1000000 estimated units
   O3YV_GATE_REP_MEDIAN_MS     0.60 ms/frame
+  O3YV_GATE_REP_OUTPUT_MS     0.75 ms/frame
   O3YV_GATE_WORST_FRAME_MS    1.20 ms
   O3YV_GATE_STRESS_*_MS       per stress kind, see script
 USAGE
@@ -51,6 +52,7 @@ stress_kinds=(all-skip prefill-shift copy16 raw-mb dc6000 ac6000 raw4x4)
 
 max_p_work=${O3YV_GATE_MAX_P_WORK:-1000000}
 rep_median_ms=${O3YV_GATE_REP_MEDIAN_MS:-0.60}
+rep_output_ms=${O3YV_GATE_REP_OUTPUT_MS:-0.75}
 worst_frame_ms=${O3YV_GATE_WORST_FRAME_MS:-1.20}
 
 metric() {
@@ -121,6 +123,15 @@ bench_output=$(
 echo "$bench_output"
 rep_median=$(printf '%s\n' "$bench_output" | metric median)
 check_le "representative median ms/frame" "$rep_median" "$rep_median_ms"
+
+output_bench_output=$(
+  qemu-arm -cpu arm11mpcore "$arm_decoder" "$input" \
+    --bench-output "$bench_iters" 2>&1
+)
+echo "$output_bench_output"
+rep_output=$(printf '%s\n' "$output_bench_output" | metric median)
+check_le "representative output median ms/frame" \
+  "$rep_output" "$rep_output_ms"
 
 frame_output=$(
   qemu-arm -cpu arm11mpcore "$arm_decoder" "$input" \
