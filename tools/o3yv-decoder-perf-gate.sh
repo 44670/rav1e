@@ -11,7 +11,7 @@ The gate enforces conservative proxy ceilings; override them with the
 O3YV_GATE_* environment variables below when intentionally retuning.
 
 Defaults:
-  input.o3yv   tmp/reencode_workcap1000.o3yv
+  input.o3yv   tmp/reencode_lazy128_current.o3yv
   bench_iters  240
   frame_iters  160
   stress_iters 160
@@ -29,7 +29,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-input=${1:-tmp/reencode_workcap1000.o3yv}
+input=${1:-tmp/reencode_lazy128_current.o3yv}
 bench_iters=${2:-240}
 frame_iters=${3:-160}
 stress_iters=${4:-160}
@@ -44,7 +44,8 @@ if ! command -v qemu-arm >/dev/null 2>&1; then
   exit 1
 fi
 
-arm_decoder=target/arm-unknown-linux-musleabi/release/minidecoder
+arm_target=arm-unknown-linux-musleabi
+arm_decoder=target/${arm_target}/release/minidecoder
 stress_dir=tmp/decoder-perf-gate
 stress_kinds=(all-skip prefill-shift copy16 raw-mb dc6000 ac6000 raw4x4)
 
@@ -92,6 +93,17 @@ stress_limit_ms() {
   esac
 }
 
+ensure_rust_target() {
+  if ! command -v rustup >/dev/null 2>&1; then
+    return
+  fi
+  if rustup target list --installed | grep -Fxq "$arm_target"; then
+    return
+  fi
+  echo "installing Rust target: $arm_target"
+  rustup target add "$arm_target"
+}
+
 echo "== native stats =="
 cargo build --release -p minidecoder --features stats
 stats_output=$(target/release/minidecoder "$input" --stats 2>&1)
@@ -101,7 +113,8 @@ check_le "estimated max P work" "$p_max" "$max_p_work"
 
 echo
 echo "== arm qemu representative stream =="
-cargo build --release -p minidecoder --target arm-unknown-linux-musleabi
+ensure_rust_target
+cargo build --release -p minidecoder --target "$arm_target"
 bench_output=$(
   qemu-arm -cpu arm11mpcore "$arm_decoder" "$input" --bench "$bench_iters" 2>&1
 )

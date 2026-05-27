@@ -10,7 +10,7 @@ build and run a real hardware decoder timing harness. This does not replace
 hardware timing; it makes missing prerequisites explicit.
 
 Defaults:
-  representative.o3yv   tmp/reencode_workcap1000_lazy96.o3yv
+  representative.o3yv   tmp/reencode_lazy128_current.o3yv
 USAGE
 }
 
@@ -19,7 +19,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-input=${1:-tmp/reencode_workcap1000_lazy96.o3yv}
+input=${1:-tmp/reencode_lazy128_current.o3yv}
 missing=0
 
 check_file() {
