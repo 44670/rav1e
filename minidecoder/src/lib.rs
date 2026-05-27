@@ -326,6 +326,7 @@ where
 
   let mut frame_count = 0usize;
   let mut reference: Option<SbsFrame> = None;
+  let mut current = SbsFrame::new();
 
   while r.remaining() > 0 {
     let frame_start = r.pos;
@@ -356,7 +357,7 @@ where
       return Err(Error::Eof);
     }
 
-    let frame = match frame_type {
+    match frame_type {
       FRAME_TYPE_KEY_RAW => {
         if tile_count != 2 {
           return Err(Error::Invalid("KEY_RAW tile_count must be 2".into()));
@@ -366,12 +367,14 @@ where
             "KEY_RAW payload must be {SBS_FRAME_BYTES} bytes, got {frame_size}"
           )));
         }
-        let left = read_eye_raw(
+        read_eye_raw_into(
+          &mut current.left,
           &bytes[payload_start..payload_start + EYE_FRAME_BYTES],
         )?;
-        let right =
-          read_eye_raw(&bytes[payload_start + EYE_FRAME_BYTES..payload_end])?;
-        SbsFrame { left, right }
+        read_eye_raw_into(
+          &mut current.right,
+          &bytes[payload_start + EYE_FRAME_BYTES..payload_end],
+        )?;
       }
       FRAME_TYPE_P => {
         if tile_count != 2 {
@@ -382,7 +385,6 @@ where
             "P-frame cannot appear before a reference frame".into(),
           )
         })?;
-        let mut current = SbsFrame::new();
         let mut pr = Reader::new(&bytes[payload_start..payload_end]);
         for _ in 0..2 {
           decode_tile(&mut pr, reference, &mut current)?;
@@ -390,14 +392,19 @@ where
         if pr.remaining() != 0 {
           return Err(Error::Invalid("unconsumed P-frame payload".into()));
         }
-        current
       }
       _ => return Err(Error::Unsupported(format!("frame type {frame_type}"))),
     };
 
     r.pos = payload_end;
-    on_frame(DecodedFrameRef { frame_no, frame_type, frame: &frame });
-    reference = Some(frame);
+    on_frame(DecodedFrameRef { frame_no, frame_type, frame: &current });
+    if let Some(reference) = reference.as_mut() {
+      std::mem::swap(reference, &mut current);
+    } else {
+      let mut next = SbsFrame::new();
+      std::mem::swap(&mut next, &mut current);
+      reference = Some(next);
+    }
     frame_count += 1;
   }
 
@@ -1250,17 +1257,16 @@ fn write_eye_raw(out: &mut Vec<u8>, eye: &EyeFrame) {
   out.extend_from_slice(&eye.cr);
 }
 
-fn read_eye_raw(bytes: &[u8]) -> Result<EyeFrame> {
+fn read_eye_raw_into(dst: &mut EyeFrame, bytes: &[u8]) -> Result<()> {
   if bytes.len() != EYE_FRAME_BYTES {
     return Err(Error::Invalid("bad eye raw size".into()));
   }
   let y_len = EYE_W * EYE_H;
   let c_len = CHROMA_W * CHROMA_H;
-  Ok(EyeFrame {
-    y: bytes[..y_len].to_vec(),
-    cb: bytes[y_len..y_len + c_len].to_vec(),
-    cr: bytes[y_len + c_len..].to_vec(),
-  })
+  dst.y.copy_from_slice(&bytes[..y_len]);
+  dst.cb.copy_from_slice(&bytes[y_len..y_len + c_len]);
+  dst.cr.copy_from_slice(&bytes[y_len + c_len..]);
+  Ok(())
 }
 
 fn clip_u8(v: i32) -> u8 {
