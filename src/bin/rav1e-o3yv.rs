@@ -185,32 +185,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let mut recent_frame_bytes = Vec::new();
   let mut total = FrameStats::default();
   let mut key_frames = 0usize;
+  let mut last_raw_frame_no: Option<usize> = None;
 
   for frame_no in 0..frame_count {
     let start = frame_no * SBS_FRAME_BYTES;
     let frame =
       SbsFrame::from_yuv420_sbs(&input[start..start + SBS_FRAME_BYTES])?;
-    let periodic_key = frame_no == 0 || frame_no % options.keyint == 0;
+    let max_gap_key =
+      raw_key_due_for_max_gap(frame_no, last_raw_frame_no, options.keyint);
     let scene_metrics = previous_source
       .as_ref()
       .map(|previous| source_scene_change_metrics(&frame, previous));
-    let scene_cut = !periodic_key
+    let scene_cut = !max_gap_key
       && scene_metrics.is_some_and(scene_change_requires_keyframe);
     let scene_key_allowed =
       rolling_window_allows_keyframe(&recent_frame_bytes);
-    let is_key = periodic_key || (scene_cut && scene_key_allowed);
+    let is_key = max_gap_key || (scene_cut && scene_key_allowed);
 
     let frame_start = stream.len();
     let recon = if is_key {
       write_key_raw_frame(&mut stream, frame_no as u32, &frame);
       key_frames += 1;
-      match (frame_no, periodic_key, scene_metrics) {
+      last_raw_frame_no = Some(frame_no);
+      match (frame_no, max_gap_key, scene_metrics) {
         (0, _, _) => eprintln!(
           "frame {frame_no}: mode=key-raw bytes={}",
           stream.len() - frame_start
         ),
         (_, true, _) => eprintln!(
-          "frame {frame_no}: mode=key-raw reason=keyint bytes={}",
+          "frame {frame_no}: mode=key-raw reason=max-gap bytes={}",
           stream.len() - frame_start
         ),
         (_, false, Some(metrics)) => eprintln!(
@@ -223,8 +226,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       }
       let key_reason = if frame_no == 0 {
         "first"
-      } else if periodic_key {
-        "keyint"
+      } else if max_gap_key {
+        "max-gap"
       } else {
         "scene-cut"
       };
@@ -387,6 +390,14 @@ fn write_output(path: &str, bytes: &[u8]) -> io::Result<()> {
   } else {
     fs::write(path, bytes)
   }
+}
+
+fn raw_key_due_for_max_gap(
+  frame_no: usize, last_raw_frame_no: Option<usize>, max_gap: usize,
+) -> bool {
+  last_raw_frame_no
+    .map(|last| frame_no.saturating_sub(last) >= max_gap)
+    .unwrap_or(true)
 }
 
 fn log_key_frame_stats(
@@ -1712,5 +1723,14 @@ mod tests {
     let metrics = source_scene_change_metrics(&second, &first);
 
     assert!(scene_change_requires_keyframe(metrics));
+  }
+
+  #[test]
+  fn raw_key_max_gap_clock_resets_after_scene_key() {
+    assert!(raw_key_due_for_max_gap(0, None, 48));
+    assert!(!raw_key_due_for_max_gap(47, Some(0), 48));
+    assert!(raw_key_due_for_max_gap(48, Some(0), 48));
+    assert!(!raw_key_due_for_max_gap(96, Some(94), 48));
+    assert!(raw_key_due_for_max_gap(142, Some(94), 48));
   }
 }
