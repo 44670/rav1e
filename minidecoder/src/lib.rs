@@ -1342,17 +1342,17 @@ fn write_raw_mb(current: &mut EyeFrame, mb_index: usize, bytes: &[u8]) {
   let mut off = 0;
   for row in 0..16 {
     let dst = (mb_y * 16 + row) * EYE_W + mb_x * 16;
-    current.y[dst..dst + 16].copy_from_slice(&bytes[off..off + 16]);
+    copy_16(&mut current.y[dst..dst + 16], &bytes[off..off + 16]);
     off += 16;
   }
   for row in 0..8 {
     let dst = (mb_y * 8 + row) * CHROMA_W + mb_x * 8;
-    current.cb[dst..dst + 8].copy_from_slice(&bytes[off..off + 8]);
+    copy_8(&mut current.cb[dst..dst + 8], &bytes[off..off + 8]);
     off += 8;
   }
   for row in 0..8 {
     let dst = (mb_y * 8 + row) * CHROMA_W + mb_x * 8;
-    current.cr[dst..dst + 8].copy_from_slice(&bytes[off..off + 8]);
+    copy_8(&mut current.cr[dst..dst + 8], &bytes[off..off + 8]);
     off += 8;
   }
 }
