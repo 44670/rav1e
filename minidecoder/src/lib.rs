@@ -825,23 +825,29 @@ fn apply_mb_residual(
     return Err(Error::Invalid("coded block mask uses reserved bits".into()));
   }
 
-  for block in 0..24 {
-    if (mask & (1 << block)) == 0 {
-      continue;
-    }
+  let mb_x = mb_index % MB_W;
+  let mb_y = mb_index / MB_W;
+  let y_base_x = mb_x * 16;
+  let y_base_y = mb_y * 16;
+  let c_base_x = mb_x * 8;
+  let c_base_y = mb_y * 8;
+  let mut coded = mask;
+  while coded != 0 {
+    let block = coded.trailing_zeros() as usize;
+    coded &= coded - 1;
     if block < 16 {
-      let bx = (mb_index % MB_W) * 16 + (block % 4) * 4;
-      let by = (mb_index / MB_W) * 16 + (block / 4) * 4;
+      let bx = y_base_x + (block & 3) * 4;
+      let by = y_base_y + (block >> 2) * 4;
       apply_block(&mut current.y, EYE_W, bx, by, residual)?;
     } else if block < 20 {
       let cblock = block - 16;
-      let bx = (mb_index % MB_W) * 8 + (cblock % 2) * 4;
-      let by = (mb_index / MB_W) * 8 + (cblock / 2) * 4;
+      let bx = c_base_x + (cblock & 1) * 4;
+      let by = c_base_y + (cblock >> 1) * 4;
       apply_block(&mut current.cb, CHROMA_W, bx, by, residual)?;
     } else {
       let cblock = block - 20;
-      let bx = (mb_index % MB_W) * 8 + (cblock % 2) * 4;
-      let by = (mb_index / MB_W) * 8 + (cblock / 2) * 4;
+      let bx = c_base_x + (cblock & 1) * 4;
+      let by = c_base_y + (cblock >> 1) * 4;
       apply_block(&mut current.cr, CHROMA_W, bx, by, residual)?;
     }
   }
@@ -1401,7 +1407,12 @@ impl<'a> Reader<'a> {
   }
 
   fn u8(&mut self) -> Result<u8> {
-    Ok(*self.take(1)?.first().unwrap())
+    if self.pos >= self.bytes.len() {
+      return Err(Error::Eof);
+    }
+    let value = self.bytes[self.pos];
+    self.pos += 1;
+    Ok(value)
   }
 
   fn i8(&mut self) -> Result<i8> {
@@ -1409,25 +1420,56 @@ impl<'a> Reader<'a> {
   }
 
   fn u16(&mut self) -> Result<u16> {
-    let bytes = self.take(2)?;
-    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+    let end = self.pos + 2;
+    if end > self.bytes.len() {
+      return Err(Error::Eof);
+    }
+    let start = self.pos;
+    self.pos = end;
+    Ok(u16::from_le_bytes([self.bytes[start], self.bytes[start + 1]]))
   }
 
   fn i16(&mut self) -> Result<i16> {
-    let bytes = self.take(2)?;
-    Ok(i16::from_le_bytes([bytes[0], bytes[1]]))
+    let end = self.pos + 2;
+    if end > self.bytes.len() {
+      return Err(Error::Eof);
+    }
+    let start = self.pos;
+    self.pos = end;
+    Ok(i16::from_le_bytes([self.bytes[start], self.bytes[start + 1]]))
   }
 
   fn u32(&mut self) -> Result<u32> {
-    let bytes = self.take(4)?;
-    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    let end = self.pos + 4;
+    if end > self.bytes.len() {
+      return Err(Error::Eof);
+    }
+    let start = self.pos;
+    self.pos = end;
+    Ok(u32::from_le_bytes([
+      self.bytes[start],
+      self.bytes[start + 1],
+      self.bytes[start + 2],
+      self.bytes[start + 3],
+    ]))
   }
 
   fn u64(&mut self) -> Result<u64> {
-    let bytes = self.take(8)?;
+    let end = self.pos + 8;
+    if end > self.bytes.len() {
+      return Err(Error::Eof);
+    }
+    let start = self.pos;
+    self.pos = end;
     Ok(u64::from_le_bytes([
-      bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
-      bytes[7],
+      self.bytes[start],
+      self.bytes[start + 1],
+      self.bytes[start + 2],
+      self.bytes[start + 3],
+      self.bytes[start + 4],
+      self.bytes[start + 5],
+      self.bytes[start + 6],
+      self.bytes[start + 7],
     ]))
   }
 }
