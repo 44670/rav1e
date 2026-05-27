@@ -1,8 +1,8 @@
 use image::{Rgb, RgbImage};
 use minidecoder::{
-  decode_stream_for_each, decode_stream_with_metadata, SbsFrame, CHROMA_W,
-  EYE_H, EYE_W, FRAME_TYPE_KEY_RAW, FRAME_TYPE_P, SBS_FRAME_BYTES, VISIBLE_H,
-  VISIBLE_W,
+  decode_stream_for_each, decode_stream_for_each_with_state,
+  decode_stream_with_metadata, DecoderState, SbsFrame, CHROMA_W, EYE_H, EYE_W,
+  FRAME_TYPE_KEY_RAW, FRAME_TYPE_P, SBS_FRAME_BYTES, VISIBLE_H, VISIBLE_W,
 };
 use std::env;
 use std::fs;
@@ -172,10 +172,11 @@ fn run_bench(
 ) -> Result<(), Box<dyn std::error::Error>> {
   let mut times = Vec::with_capacity(iterations);
   let mut frames_per_iter = None;
+  let mut state = DecoderState::new();
 
   for _ in 0..iterations {
     let start = Instant::now();
-    let frames = decode_stream_for_each(bytes, |_| {})?;
+    let frames = decode_stream_for_each_with_state(bytes, &mut state, |_| {})?;
     let elapsed = start.elapsed();
     if let Some(expected) = frames_per_iter {
       if frames != expected {
@@ -223,26 +224,28 @@ fn run_frame_bench(
   let mut frame_types = Vec::new();
   let mut times_by_frame: Vec<Vec<Duration>> = Vec::new();
   let mut frames_per_iter = None;
+  let mut state = DecoderState::new();
 
   for iter in 0..iterations {
     let mut index = 0usize;
     let mut last = Instant::now();
-    let frames = decode_stream_for_each(bytes, |decoded| {
-      let now = Instant::now();
-      let elapsed = now.duration_since(last);
-      last = now;
+    let frames =
+      decode_stream_for_each_with_state(bytes, &mut state, |decoded| {
+        let now = Instant::now();
+        let elapsed = now.duration_since(last);
+        last = now;
 
-      if iter == 0 {
-        frame_nos.push(decoded.frame_no);
-        frame_types.push(decoded.frame_type);
-        times_by_frame.push(Vec::with_capacity(iterations));
-      } else {
-        debug_assert_eq!(frame_nos[index], decoded.frame_no);
-        debug_assert_eq!(frame_types[index], decoded.frame_type);
-      }
-      times_by_frame[index].push(elapsed);
-      index += 1;
-    })?;
+        if iter == 0 {
+          frame_nos.push(decoded.frame_no);
+          frame_types.push(decoded.frame_type);
+          times_by_frame.push(Vec::with_capacity(iterations));
+        } else {
+          debug_assert_eq!(frame_nos[index], decoded.frame_no);
+          debug_assert_eq!(frame_types[index], decoded.frame_type);
+        }
+        times_by_frame[index].push(elapsed);
+        index += 1;
+      })?;
 
     if index != frames {
       return Err("decoded frame callback count mismatch".into());

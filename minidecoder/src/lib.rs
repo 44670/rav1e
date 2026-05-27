@@ -181,6 +181,33 @@ pub struct DecodedFrameRef<'a> {
   pub frame: &'a SbsFrame,
 }
 
+#[derive(Debug, Clone)]
+pub struct DecoderState {
+  reference: SbsFrame,
+  current: SbsFrame,
+  has_reference: bool,
+}
+
+impl DecoderState {
+  pub fn new() -> Self {
+    Self {
+      reference: SbsFrame::new(),
+      current: SbsFrame::new(),
+      has_reference: false,
+    }
+  }
+
+  pub fn reset(&mut self) {
+    self.has_reference = false;
+  }
+}
+
+impl Default for DecoderState {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mv {
   pub x: i8,
@@ -328,12 +355,23 @@ pub fn decode_stream_for_each<F>(
 where
   F: FnMut(DecodedFrameRef<'_>),
 {
+  let mut state = DecoderState::new();
+  decode_stream_for_each_with_state(bytes, &mut state, |decoded| {
+    on_frame(decoded);
+  })
+}
+
+pub fn decode_stream_for_each_with_state<F>(
+  bytes: &[u8], state: &mut DecoderState, mut on_frame: F,
+) -> Result<usize>
+where
+  F: FnMut(DecodedFrameRef<'_>),
+{
   let mut r = Reader::new(bytes);
   parse_file_header(&mut r)?;
 
+  state.reset();
   let mut frame_count = 0usize;
-  let mut reference: Option<SbsFrame> = None;
-  let mut current = SbsFrame::new();
 
   while r.remaining() > 0 {
     let frame_start = r.pos;
@@ -375,11 +413,11 @@ where
           )));
         }
         read_eye_raw_into(
-          &mut current.left,
+          &mut state.current.left,
           &bytes[payload_start..payload_start + EYE_FRAME_BYTES],
         )?;
         read_eye_raw_into(
-          &mut current.right,
+          &mut state.current.right,
           &bytes[payload_start + EYE_FRAME_BYTES..payload_end],
         )?;
       }
@@ -387,11 +425,12 @@ where
         if tile_count != 2 {
           return Err(Error::Invalid("P-frame tile_count must be 2".into()));
         }
-        let reference = reference.as_ref().ok_or_else(|| {
-          Error::Invalid(
+        if !state.has_reference {
+          return Err(Error::Invalid(
             "P-frame cannot appear before a reference frame".into(),
-          )
-        })?;
+          ));
+        }
+        let reference = &state.reference;
         if frame_size <= REFERENCE_REUSE_FRAME_PAYLOAD_MAX
           && p_payload_reuses_reference(
             &bytes[payload_start..payload_end],
@@ -405,7 +444,7 @@ where
         }
         let mut pr = Reader::new(&bytes[payload_start..payload_end]);
         for _ in 0..2 {
-          decode_tile(&mut pr, reference, &mut current)?;
+          decode_tile(&mut pr, reference, &mut state.current)?;
         }
         if pr.remaining() != 0 {
           return Err(Error::Invalid("unconsumed P-frame payload".into()));
@@ -415,14 +454,9 @@ where
     };
 
     r.pos = payload_end;
-    on_frame(DecodedFrameRef { frame_no, frame_type, frame: &current });
-    if let Some(reference) = reference.as_mut() {
-      std::mem::swap(reference, &mut current);
-    } else {
-      let mut next = SbsFrame::new();
-      std::mem::swap(&mut next, &mut current);
-      reference = Some(next);
-    }
+    on_frame(DecodedFrameRef { frame_no, frame_type, frame: &state.current });
+    std::mem::swap(&mut state.reference, &mut state.current);
+    state.has_reference = true;
     frame_count += 1;
   }
 
@@ -1983,6 +2017,40 @@ mod tests {
     let frames = decode_stream(&bytes).unwrap();
     assert_eq!(frames[0], key);
     assert_eq!(frames[1], key);
+  }
+
+  #[test]
+  fn reusable_decoder_state_resets_between_streams() {
+    let key = patterned_frame(1);
+    let mut bytes = Vec::new();
+    write_file_header(&mut bytes, 2);
+    write_key_raw_frame(&mut bytes, 0, &key);
+    write_p_frame(&mut bytes, 1, all_skip_tile(0), all_skip_tile(1));
+
+    let mut state = DecoderState::new();
+    let mut frames = Vec::new();
+    let decoded =
+      decode_stream_for_each_with_state(&bytes, &mut state, |decoded| {
+        frames.push(decoded.frame.clone());
+      })
+      .unwrap();
+    assert_eq!(decoded, 2);
+    assert_eq!(frames[1], key);
+
+    let mut p_without_reference = Vec::new();
+    write_file_header(&mut p_without_reference, 1);
+    write_p_frame(
+      &mut p_without_reference,
+      0,
+      all_skip_tile(0),
+      all_skip_tile(1),
+    );
+    assert!(decode_stream_for_each_with_state(
+      &p_without_reference,
+      &mut state,
+      |_| {},
+    )
+    .is_err());
   }
 
   #[test]
