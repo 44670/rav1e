@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+alloc-check = ["std"]
 default = ["std"]
 png = ["std", "dep:image"]
 stats = ["std"]
@@ -22,6 +23,11 @@ path = "src/main.rs"
 name = "o3yv-stress"
 path = "src/bin/o3yv-stress.rs"
 required-features = ["stress"]
+
+[[bin]]
+name = "o3yv-alloc-check"
+path = "src/bin/o3yv-alloc-check.rs"
+required-features = ["alloc-check"]
 
 [dependencies]
 image = { version = "0.25.0", default-features = false, features = ["png"], optional = true }

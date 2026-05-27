@@ -67,10 +67,27 @@ check_minidecoder_nostd() {
   fi
 }
 
+check_minidecoder_alloc_free_decode() {
+  local input=$1
+  local log=/tmp/o3yv-minidecoder-alloc-check.log
+  if cargo run --release -q -p minidecoder --no-default-features \
+    --features alloc-check --bin o3yv-alloc-check -- "$input" \
+    >"$log" 2>&1; then
+    echo "PASS minidecoder reusable-state decode alloc check: $(cat "$log")"
+  else
+    echo "MISS minidecoder reusable-state decode alloc check; see $log" >&2
+    cat "$log" >&2
+    missing=1
+  fi
+}
+
 check_file "representative stream" "$input"
 check_command cargo
 if command -v cargo >/dev/null 2>&1; then
   check_minidecoder_nostd
+  if [[ -f "$input" ]]; then
+    check_minidecoder_alloc_free_decode "$input"
+  fi
 fi
 check_command arm-none-eabi-gcc
 check_command makerom
