@@ -882,10 +882,11 @@ fn apply_block(
       }
       let mut coeffs = [0i32; 16];
       let nz_mask = residual.u16()?;
-      for zz in 0..16 {
-        if (nz_mask & (1 << zz)) != 0 {
-          coeffs[ZIGZAG[zz]] = residual.i8()? as i32;
-        }
+      let mut nz = nz_mask;
+      while nz != 0 {
+        let zz = nz.trailing_zeros() as usize;
+        nz &= nz - 1;
+        coeffs[ZIGZAG[zz]] = residual.i8()? as i32;
       }
       add_idct_block(plane, stride, x, y, coeffs);
     }
@@ -898,10 +899,11 @@ fn apply_block(
         }
         let mut coeffs = [0i32; 16];
         let nz_mask = residual.u16()?;
-        for zz in 0..16 {
-          if (nz_mask & (1 << zz)) != 0 {
-            coeffs[ZIGZAG[zz]] = residual.i16()? as i32;
-          }
+        let mut nz = nz_mask;
+        while nz != 0 {
+          let zz = nz.trailing_zeros() as usize;
+          nz &= nz - 1;
+          coeffs[ZIGZAG[zz]] = residual.i16()? as i32;
         }
         add_idct_block(plane, stride, x, y, coeffs);
       } else {
