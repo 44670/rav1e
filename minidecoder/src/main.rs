@@ -209,6 +209,7 @@ struct StreamStats {
   p_payload_bytes: usize,
   max_frame_payload_bytes: usize,
   max_p_payload_bytes: usize,
+  max_p_payload_frame_no: u32,
   tiles: usize,
   fragments: usize,
   segment_map_bytes: usize,
@@ -227,6 +228,9 @@ struct StreamStats {
   raw_4x4_blocks: usize,
   p_work_units: usize,
   max_p_work_units: usize,
+  max_p_work_frame_no: u32,
+  max_p_work_frame_payload_bytes: usize,
+  max_p_work: FrameWorkload,
   max_p_segment_map_bytes: usize,
   max_p_mode_bytes: usize,
   max_p_residual_bytes: usize,
@@ -238,7 +242,9 @@ struct StreamStats {
   max_p_residual_mb: usize,
   max_p_dc_only_blocks: usize,
   max_p_full_idct_blocks: usize,
+  max_p_full_idct_frame_no: u32,
   max_p_raw_4x4_blocks: usize,
+  max_p_raw_4x4_frame_no: u32,
 }
 
 #[cfg(feature = "stats")]
@@ -273,6 +279,12 @@ fn print_stream_stats(
     stats.max_frame_payload_bytes,
     stats.max_p_payload_bytes
   );
+  if stats.p_frames > 0 {
+    eprintln!(
+      "stats max_p_payload frame_no={} bytes={}",
+      stats.max_p_payload_frame_no, stats.max_p_payload_bytes
+    );
+  }
   eprintln!(
     "stats tiles={} fragments={} prefill_zero_tiles={} prefill_shift_tiles={}",
     stats.tiles,
@@ -328,6 +340,29 @@ fn print_stream_stats(
       stats.max_p_work_units,
       268_000_000usize * 15 / 1000
     );
+    let frame = stats.max_p_work;
+    eprintln!(
+      "stats max_p_work frame_no={} payload_bytes={} work={} segment_map={} mode={} residual={} raw={} skip={} copy16={} copy_vbs={} raw_mb={} residual_mb={} dc_only={} full_idct={} raw_4x4={}",
+      stats.max_p_work_frame_no,
+      stats.max_p_work_frame_payload_bytes,
+      stats.max_p_work_units,
+      frame.segment_map_bytes,
+      frame.mode_bytes,
+      frame.residual_bytes,
+      frame.raw_bytes,
+      frame.skip_mb,
+      frame.copy16_mb,
+      frame.copy_vbs_mb,
+      frame.raw_mb,
+      frame.residual_mb,
+      frame.dc_only_blocks,
+      frame.full_idct_blocks,
+      frame.raw_4x4_blocks
+    );
+    eprintln!(
+      "stats max_p_block_frames full_idct_frame_no={} raw_4x4_frame_no={}",
+      stats.max_p_full_idct_frame_no, stats.max_p_raw_4x4_frame_no
+    );
   }
   Ok(())
 }
@@ -351,7 +386,10 @@ impl StreamStats {
     }
   }
 
-  fn record_p_workload(&mut self, before: FrameWorkload, tile_count: usize) {
+  fn record_p_workload(
+    &mut self, frame_no: u32, frame_payload_bytes: usize,
+    before: FrameWorkload, tile_count: usize,
+  ) {
     let after = self.workload_snapshot();
     let frame = FrameWorkload {
       segment_map_bytes: after.segment_map_bytes - before.segment_map_bytes,
@@ -369,7 +407,12 @@ impl StreamStats {
     };
     let work_units = estimate_p_work_units(&frame, tile_count);
     self.p_work_units += work_units;
-    self.max_p_work_units = self.max_p_work_units.max(work_units);
+    if work_units > self.max_p_work_units {
+      self.max_p_work_units = work_units;
+      self.max_p_work_frame_no = frame_no;
+      self.max_p_work_frame_payload_bytes = frame_payload_bytes;
+      self.max_p_work = frame;
+    }
     self.max_p_segment_map_bytes =
       self.max_p_segment_map_bytes.max(frame.segment_map_bytes);
     self.max_p_mode_bytes = self.max_p_mode_bytes.max(frame.mode_bytes);
@@ -383,10 +426,14 @@ impl StreamStats {
     self.max_p_residual_mb = self.max_p_residual_mb.max(frame.residual_mb);
     self.max_p_dc_only_blocks =
       self.max_p_dc_only_blocks.max(frame.dc_only_blocks);
-    self.max_p_full_idct_blocks =
-      self.max_p_full_idct_blocks.max(frame.full_idct_blocks);
-    self.max_p_raw_4x4_blocks =
-      self.max_p_raw_4x4_blocks.max(frame.raw_4x4_blocks);
+    if frame.full_idct_blocks > self.max_p_full_idct_blocks {
+      self.max_p_full_idct_blocks = frame.full_idct_blocks;
+      self.max_p_full_idct_frame_no = frame_no;
+    }
+    if frame.raw_4x4_blocks > self.max_p_raw_4x4_blocks {
+      self.max_p_raw_4x4_blocks = frame.raw_4x4_blocks;
+      self.max_p_raw_4x4_frame_no = frame_no;
+    }
   }
 }
 
@@ -442,7 +489,7 @@ fn collect_stream_stats(
       return Err("bad frame start code".into());
     }
     let frame_size = r.u32()? as usize;
-    let _frame_no = r.u32()?;
+    let frame_no = r.u32()?;
     let _pts_ticks = r.u32()?;
     let frame_type = r.u8()?;
     let tile_count = r.u8()?;
@@ -479,7 +526,10 @@ fn collect_stream_stats(
         }
         stats.p_frames += 1;
         stats.p_payload_bytes += frame_size;
-        stats.max_p_payload_bytes = stats.max_p_payload_bytes.max(frame_size);
+        if frame_size > stats.max_p_payload_bytes {
+          stats.max_p_payload_bytes = frame_size;
+          stats.max_p_payload_frame_no = frame_no;
+        }
         let before = stats.workload_snapshot();
         let mut pr = StatsReader::new(&bytes[payload_start..payload_end]);
         for _ in 0..2 {
@@ -488,7 +538,12 @@ fn collect_stream_stats(
         if pr.remaining() != 0 {
           return Err("unconsumed P-frame payload".into());
         }
-        stats.record_p_workload(before, tile_count as usize);
+        stats.record_p_workload(
+          frame_no,
+          frame_size,
+          before,
+          tile_count as usize,
+        );
       }
       _ => return Err(format!("unsupported frame type {frame_type}").into()),
     }
