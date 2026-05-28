@@ -1302,28 +1302,23 @@ fn apply_mb_residual(
 
   let mb_x = mb_index % MB_W;
   let mb_y = mb_index / MB_W;
-  let y_base_x = mb_x * 16;
-  let y_base_y = mb_y * 16;
-  let c_base_x = mb_x * 8;
-  let c_base_y = mb_y * 8;
+  let y_base = mb_y * 16 * EYE_W + mb_x * 16;
+  let c_base = mb_y * 8 * CHROMA_W + mb_x * 8;
   let mut coded = mask;
   while coded != 0 {
     let block = coded.trailing_zeros() as usize;
     coded &= coded - 1;
     if block < 16 {
-      let bx = y_base_x + (block & 3) * 4;
-      let by = y_base_y + (block >> 2) * 4;
-      apply_block(&mut current.y, EYE_W, bx, by, residual)?;
+      let off = y_base + (block >> 2) * 4 * EYE_W + (block & 3) * 4;
+      apply_block(&mut current.y, EYE_W, off, residual)?;
     } else if block < 20 {
       let cblock = block - 16;
-      let bx = c_base_x + (cblock & 1) * 4;
-      let by = c_base_y + (cblock >> 1) * 4;
-      apply_block(&mut current.cb, CHROMA_W, bx, by, residual)?;
+      let off = c_base + (cblock >> 1) * 4 * CHROMA_W + (cblock & 1) * 4;
+      apply_block(&mut current.cb, CHROMA_W, off, residual)?;
     } else {
       let cblock = block - 20;
-      let bx = c_base_x + (cblock & 1) * 4;
-      let by = c_base_y + (cblock >> 1) * 4;
-      apply_block(&mut current.cr, CHROMA_W, bx, by, residual)?;
+      let off = c_base + (cblock >> 1) * 4 * CHROMA_W + (cblock & 1) * 4;
+      apply_block(&mut current.cr, CHROMA_W, off, residual)?;
     }
   }
   Ok(())
@@ -1331,22 +1326,21 @@ fn apply_mb_residual(
 
 #[inline(always)]
 fn apply_block(
-  plane: &mut [u8], stride: usize, x: usize, y: usize,
-  residual: &mut Reader<'_>,
+  plane: &mut [u8], stride: usize, base: usize, residual: &mut Reader<'_>,
 ) -> Result<()> {
   let tag = residual.u8()?;
   if tag == TAG_RAW_4X4 {
-    copy_raw_4x4_from_reader(plane, stride, x, y, residual)?;
+    copy_raw_4x4_from_reader(plane, stride, base, residual)?;
     return Ok(());
   }
   if tag == TAG_DC_ONLY_S8 {
     let coeff = residual.i8()? as i32;
-    add_dc_block(plane, stride, x, y, coeff);
+    add_dc_block(plane, stride, base, coeff);
     return Ok(());
   }
   if tag == TAG_DC_ONLY_S16 {
     let coeff = residual.i16()? as i32;
-    add_dc_block(plane, stride, x, y, coeff);
+    add_dc_block(plane, stride, base, coeff);
     return Ok(());
   }
   if tag == TAG_AC_MASK_S8 {
@@ -1358,7 +1352,7 @@ fn apply_block(
       nz &= nz - 1;
       store_coeff(&mut coeffs, zigzag_at(zz), residual.i8()? as i32);
     }
-    add_idct_block(plane, stride, x, y, coeffs);
+    add_idct_block(plane, stride, base, coeffs);
     return Ok(());
   }
   if tag == TAG_AC_MASK_S16 {
@@ -1370,7 +1364,7 @@ fn apply_block(
       nz &= nz - 1;
       store_coeff(&mut coeffs, zigzag_at(zz), residual.i16()? as i32);
     }
-    add_idct_block(plane, stride, x, y, coeffs);
+    add_idct_block(plane, stride, base, coeffs);
     return Ok(());
   }
   Err(Error::Invalid("reserved residual tag bits set".into()))
@@ -1378,8 +1372,7 @@ fn apply_block(
 
 #[inline(always)]
 fn copy_raw_4x4_from_reader(
-  plane: &mut [u8], stride: usize, x: usize, y: usize,
-  residual: &mut Reader<'_>,
+  plane: &mut [u8], stride: usize, base: usize, residual: &mut Reader<'_>,
 ) -> Result<()> {
   let start = residual.pos;
   let end = start + 16;
@@ -1393,7 +1386,7 @@ fn copy_raw_4x4_from_reader(
   // masks, so the destination rows are in-bounds in release builds.
   unsafe {
     let src = residual.bytes.as_ptr().add(start);
-    let dst0 = y * stride + x;
+    let dst0 = base;
     let dst1 = dst0 + stride;
     let dst2 = dst1 + stride;
     let dst3 = dst2 + stride;
@@ -1411,15 +1404,12 @@ fn copy_raw_4x4_from_reader(
 }
 
 #[inline(always)]
-fn add_dc_block(
-  plane: &mut [u8], stride: usize, x: usize, y: usize, coeff: i32,
-) {
+fn add_dc_block(plane: &mut [u8], stride: usize, base: usize, coeff: i32) {
   let delta = (coeff + 4) >> 3;
   if delta == 0 {
     return;
   }
 
-  let base = y * stride + x;
   if (DC_CLIP_DELTA_MIN..=DC_CLIP_DELTA_MAX).contains(&delta) {
     let table = dc_clip_table_at((delta - DC_CLIP_DELTA_MIN) as usize);
     add_dc_row4_table(plane, base, table);
@@ -1452,7 +1442,7 @@ fn add_dc_row4(plane: &mut [u8], idx: usize, delta: i32) {
 
 #[inline(always)]
 fn add_idct_block(
-  plane: &mut [u8], stride: usize, x: usize, y: usize, coeffs: [i32; 16],
+  plane: &mut [u8], stride: usize, base: usize, coeffs: [i32; 16],
 ) {
   let (t0, t4, t8, t12) = idct_1d(coeffs[0], coeffs[4], coeffs[8], coeffs[12]);
   let (t1, t5, t9, t13) = idct_1d(coeffs[1], coeffs[5], coeffs[9], coeffs[13]);
@@ -1462,13 +1452,13 @@ fn add_idct_block(
     idct_1d(coeffs[3], coeffs[7], coeffs[11], coeffs[15]);
 
   let (v0, v1, v2, v3) = idct_1d(t0, t1, t2, t3);
-  add_idct_row(plane, y * stride + x, v0, v1, v2, v3);
+  add_idct_row(plane, base, v0, v1, v2, v3);
   let (v0, v1, v2, v3) = idct_1d(t4, t5, t6, t7);
-  add_idct_row(plane, (y + 1) * stride + x, v0, v1, v2, v3);
+  add_idct_row(plane, base + stride, v0, v1, v2, v3);
   let (v0, v1, v2, v3) = idct_1d(t8, t9, t10, t11);
-  add_idct_row(plane, (y + 2) * stride + x, v0, v1, v2, v3);
+  add_idct_row(plane, base + stride * 2, v0, v1, v2, v3);
   let (v0, v1, v2, v3) = idct_1d(t12, t13, t14, t15);
-  add_idct_row(plane, (y + 3) * stride + x, v0, v1, v2, v3);
+  add_idct_row(plane, base + stride * 3, v0, v1, v2, v3);
 }
 
 #[inline(always)]
@@ -2489,7 +2479,7 @@ mod tests {
 
     let frames = decode_stream(&bytes).unwrap();
     let mut expected = key.clone();
-    add_dc_block(&mut expected.left.y, EYE_W, 0, 0, 5 * 8);
+    add_dc_block(&mut expected.left.y, EYE_W, 0, 5 * 8);
 
     assert_eq!(frames[1], key);
     assert_eq!(frames[2], expected);
@@ -2683,12 +2673,12 @@ mod tests {
     for coeff in -64..=64 {
       let mut dc_plane = vec![91u8; 8 * 8];
       let mut idct_plane = dc_plane.clone();
-      add_dc_block(&mut dc_plane, 8, 2, 2, coeff);
+      let base = 2 * 8 + 2;
+      add_dc_block(&mut dc_plane, 8, base, coeff);
       add_idct_block(
         &mut idct_plane,
         8,
-        2,
-        2,
+        base,
         [coeff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       );
       assert_eq!(dc_plane, idct_plane);
