@@ -54,6 +54,13 @@ cp old3ds/build/o3yvbench.3dsx "$out_dir/o3yvbench.3dsx"
 expected=$(
   tools/o3yv-old3ds-expected-checksum.sh "$input" "$iterations"
 )
+frames_per_iteration=$(
+  awk -F= '/^frames_per_iteration=/ { print $2; exit }' <<<"$expected"
+)
+if [[ -z "$frames_per_iteration" ]]; then
+  echo "failed to parse expected frames_per_iteration" >&2
+  exit 1
+fi
 printf '%s\n' "$expected" >"$out_dir/expected.txt"
 sha256sum "$out_dir/o3yvbench.3dsx" >"$out_dir/o3yvbench.3dsx.sha256"
 
@@ -73,11 +80,12 @@ verify timing/output determinism from the repository root with:
 
 For playback timing, inspect:
 
-  grep '^playback_result ' "$out_dir/old3ds-bench.log"
+  tools/o3yv-old3ds-check-playback-log.sh "$out_dir/old3ds-bench.log" "41666" "$frames_per_iteration" "24" "y2r"
 
 Passing target:
 
   worst_us <= $target_us
+  playback worst_work_us <= 41666 and late_frames == 0
 EOF
 
 echo "wrote Old3DS run bundle: $out_dir"

@@ -6,7 +6,7 @@ usage() {
 usage: tools/o3yv-azahar-run-bench.sh <o3yvbench.3dsx> [out.log] [timeout_seconds] [wait_prefix]
 
 Launches the Old3DS benchmark bundle in Azahar, waits for sdmc:/o3yvbench.log
-to contain a bench_result line, copies that log to out.log, and stops Azahar.
+to contain wait_prefix, copies that log to out.log, and stops Azahar.
 
 Defaults:
   out.log          tmp/azahar-o3yvbench.log
@@ -80,7 +80,7 @@ while (( SECONDS < deadline )); do
     exit 0
   fi
   if ! kill -0 "$azahar_pid" >/dev/null 2>&1; then
-    echo "Azahar exited before writing bench_result" >&2
+    echo "Azahar exited before writing ${wait_prefix}" >&2
     if [[ -f "$sd_log" ]]; then
       cat "$sd_log" >&2
     fi

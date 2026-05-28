@@ -79,3 +79,11 @@ After the run, copy `sdmc:/o3yvbench.log` back to the host and check it with:
 tools/o3yv-old3ds-verify-log.sh \
   old3ds-bench.log tmp/reencode_lazy128_current.o3yv 8 15000
 ```
+
+The strict verifier above checks the conservative decoder budget. To validate
+the rendered 24 fps playback pass separately:
+
+```sh
+tools/o3yv-old3ds-check-playback-log.sh \
+  old3ds-bench.log 41666 100 24 y2r
+```
