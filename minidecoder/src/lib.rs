@@ -965,9 +965,7 @@ fn decode_fragment(
         return Err(Error::Invalid("skip run exceeds fragment".into()));
       }
       if let BaseCopyMode::Lazy(base_mv) = base_copy_mode {
-        for skipped in mb_index..mb_index + run {
-          copy_mb_from_reference(current, reference, skipped, base_mv);
-        }
+        copy_mb_run_from_reference(current, reference, mb_index, run, base_mv);
       }
       mb_index += run;
     } else if (op & 0xf0) == 0x80 {
@@ -1543,6 +1541,75 @@ pub fn copy_mb_from_reference(
     (mv.x as i32) >> 1,
     (mv.y as i32) >> 1,
   );
+}
+
+#[inline(always)]
+fn copy_mb_run_from_reference(
+  dst: &mut EyeFrame, src: &EyeFrame, start_mb: usize, count: usize, mv: Mv,
+) {
+  if mv == Mv::ZERO {
+    copy_mb_run_zero_mv(dst, src, start_mb, count);
+    return;
+  }
+
+  let end_mb = start_mb + count;
+  let mut mb_index = start_mb;
+  while mb_index < end_mb {
+    copy_mb_from_reference(dst, src, mb_index, mv);
+    mb_index += 1;
+  }
+}
+
+#[inline(always)]
+fn copy_mb_run_zero_mv(
+  dst: &mut EyeFrame, src: &EyeFrame, start_mb: usize, count: usize,
+) {
+  debug_assert!(start_mb + count <= MB_COUNT);
+
+  let end_mb = start_mb + count;
+  let mut mb_index = start_mb;
+  while mb_index < end_mb {
+    let mb_x = mb_index % MB_W;
+    let mb_y = mb_index / MB_W;
+    let row_mbs = (MB_W - mb_x).min(end_mb - mb_index);
+    if row_mbs >= 8 {
+      copy_mb_row_span_zero_mv(dst, src, mb_x, mb_y, row_mbs);
+    } else {
+      let row_end = mb_index + row_mbs;
+      while mb_index < row_end {
+        copy_mb_zero_mv(dst, src, mb_index);
+        mb_index += 1;
+      }
+      continue;
+    }
+    mb_index += row_mbs;
+  }
+}
+
+#[inline(always)]
+fn copy_mb_row_span_zero_mv(
+  dst: &mut EyeFrame, src: &EyeFrame, mb_x: usize, mb_y: usize,
+  mb_count: usize,
+) {
+  debug_assert!(mb_x + mb_count <= MB_W);
+  debug_assert!(mb_y < MB_H);
+
+  let y_x = mb_x * 16;
+  let y_y = mb_y * 16;
+  let y_len = mb_count * 16;
+  for row in 0..16 {
+    let off = (y_y + row) * EYE_W + y_x;
+    copy_at_len(&mut dst.y, off, &src.y, off, y_len);
+  }
+
+  let c_x = mb_x * 8;
+  let c_y = mb_y * 8;
+  let c_len = mb_count * 8;
+  for row in 0..8 {
+    let off = (c_y + row) * CHROMA_W + c_x;
+    copy_at_len(&mut dst.cb, off, &src.cb, off, c_len);
+    copy_at_len(&mut dst.cr, off, &src.cr, off, c_len);
+  }
 }
 
 #[inline(always)]
