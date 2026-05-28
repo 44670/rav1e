@@ -1675,7 +1675,7 @@ pub fn copy_vbs_from_reference(
   let base_x = mb_x * 16;
   let base_y = mb_y * 16;
 
-  match shape {
+  let (avg_x, avg_y) = match shape {
     VbsShape::Split16x8 => {
       copy_rect(
         &mut dst.y,
@@ -1701,6 +1701,10 @@ pub fn copy_vbs_from_reference(
         mvs[1].x as i32,
         mvs[1].y as i32,
       );
+      (
+        round_div2_i32(mvs[0].x as i32 + mvs[1].x as i32),
+        round_div2_i32(mvs[0].y as i32 + mvs[1].y as i32),
+      )
     }
     VbsShape::Split8x16 => {
       copy_rect(
@@ -1727,6 +1731,10 @@ pub fn copy_vbs_from_reference(
         mvs[1].x as i32,
         mvs[1].y as i32,
       );
+      (
+        round_div2_i32(mvs[0].x as i32 + mvs[1].x as i32),
+        round_div2_i32(mvs[0].y as i32 + mvs[1].y as i32),
+      )
     }
     VbsShape::Split8x8 => {
       for part_y in 0..2 {
@@ -1746,10 +1754,23 @@ pub fn copy_vbs_from_reference(
           );
         }
       }
+      (
+        round_div4_i32(
+          mvs[0].x as i32
+            + mvs[1].x as i32
+            + mvs[2].x as i32
+            + mvs[3].x as i32,
+        ),
+        round_div4_i32(
+          mvs[0].y as i32
+            + mvs[1].y as i32
+            + mvs[2].y as i32
+            + mvs[3].y as i32,
+        ),
+      )
     }
-  }
+  };
 
-  let (avg_x, avg_y) = average_mv(mvs);
   copy_rect(
     &mut dst.cb,
     &src.cb,
@@ -1777,23 +1798,20 @@ pub fn copy_vbs_from_reference(
 }
 
 #[inline(always)]
-fn average_mv(mvs: &[Mv]) -> (i32, i32) {
-  let mut x = 0i32;
-  let mut y = 0i32;
-  for mv in mvs {
-    x += mv.x as i32;
-    y += mv.y as i32;
+fn round_div2_i32(value: i32) -> i32 {
+  if value >= 0 {
+    (value + 1) >> 1
+  } else {
+    -((-value + 1) >> 1)
   }
-  let n = mvs.len() as i32;
-  (round_div_i32(x, n), round_div_i32(y, n))
 }
 
 #[inline(always)]
-fn round_div_i32(value: i32, divisor: i32) -> i32 {
+fn round_div4_i32(value: i32) -> i32 {
   if value >= 0 {
-    (value + divisor / 2) / divisor
+    (value + 2) >> 2
   } else {
-    -((-value + divisor / 2) / divisor)
+    -((-value + 2) >> 2)
   }
 }
 
