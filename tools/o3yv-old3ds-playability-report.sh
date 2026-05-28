@@ -9,6 +9,7 @@ Summarizes an o3yvbench.3dsx log for Old3DS playability. This does not replace
 the strict decoder verifier; it reports both:
 
   - deterministic decoded output and strict decoder benchmark status
+  - optional direct-plane decoder benchmark status
   - rendered 24 fps playback status
 
 Defaults:
@@ -174,6 +175,61 @@ if [[ "$bench_timing_status" == "pass" ]] && (( bench_worst_us <= bench_target_u
   bench_timing_ok=pass
 fi
 
+direct_line=$(grep '^direct_bench_result ' "$log" | tail -1 || true)
+direct_bench_ok=unknown
+direct_status=unknown
+direct_frames=unknown
+direct_frames_per_iteration=unknown
+direct_output_mode=unknown
+direct_target_reported=unknown
+direct_worst_us=unknown
+direct_worst_decode_us=unknown
+direct_worst_output_us=unknown
+direct_timing_status=unknown
+direct_frame_count_status=unknown
+if [[ -n "$direct_line" ]]; then
+  direct_status=$(kv_value "$direct_line" status)
+  direct_frames=$(kv_value "$direct_line" frames)
+  direct_frames_per_iteration=$(kv_value "$direct_line" frames_per_iteration)
+  direct_output_mode=$(kv_value "$direct_line" output_mode)
+  direct_target_reported=$(kv_value "$direct_line" target_us)
+  direct_worst_us=$(kv_value "$direct_line" worst_us)
+  direct_worst_decode_us=$(kv_value "$direct_line" worst_decode_us)
+  direct_worst_output_us=$(kv_value "$direct_line" worst_output_us)
+  direct_timing_status=$(kv_value "$direct_line" timing_status)
+  direct_frame_count_status=$(kv_value "$direct_line" frame_count_status)
+
+  for item in direct_status direct_frames direct_frames_per_iteration \
+    direct_output_mode direct_target_reported direct_worst_us \
+    direct_timing_status direct_frame_count_status; do
+    if [[ -z "${!item}" ]]; then
+      echo "FAIL missing $item in direct_bench_result" >&2
+      exit 1
+    fi
+  done
+  for item in direct_frames direct_frames_per_iteration \
+    direct_target_reported direct_worst_us; do
+    require_uint "$item" "${!item}"
+  done
+  for item in direct_worst_decode_us direct_worst_output_us; do
+    if [[ -n "${!item}" ]]; then
+      require_uint "$item" "${!item}"
+    fi
+  done
+
+  direct_bench_ok=fail
+  if [[ "$direct_status" == "pass" ]] \
+    && [[ "$direct_output_mode" == "direct_planes" ]] \
+    && [[ "$direct_timing_status" == "pass" ]] \
+    && [[ "$direct_frame_count_status" == "pass" ]] \
+    && (( direct_frames_per_iteration == frames_per_iteration )) \
+    && (( direct_frames == iterations * frames_per_iteration )) \
+    && (( direct_target_reported == bench_target_us )) \
+    && (( direct_worst_us <= bench_target_us )); then
+    direct_bench_ok=pass
+  fi
+fi
+
 playback_line=$(grep '^playback_result ' "$log" | tail -1 || true)
 if [[ -z "$playback_line" ]]; then
   echo "FAIL no playback_result line found" >&2
@@ -249,6 +305,13 @@ printf 'bench_timing status=%s harness_status=%s timing_status=%s worst_us=%s ta
   "$bench_timing_ok" "$bench_status" "$bench_timing_status" \
   "$bench_worst_us" "$bench_target_us" \
   "${bench_decode_worst_us:-unknown}" "${bench_output_worst_us:-unknown}"
+printf 'direct_bench status=%s harness_status=%s output_mode=%s frames=%s frames_per_iteration=%s worst_us=%s target_us=%s timing_status=%s frame_count_status=%s worst_decode_us=%s worst_output_us=%s\n' \
+  "$direct_bench_ok" "$direct_status" "$direct_output_mode" \
+  "$direct_frames" "$direct_frames_per_iteration" "$direct_worst_us" \
+  "$bench_target_us" "$direct_timing_status" \
+  "$direct_frame_count_status" \
+  "${direct_worst_decode_us:-unknown}" \
+  "${direct_worst_output_us:-unknown}"
 printf 'playback status=%s renderer=%s output_mode=%s frames=%s fps=%s mean_work_us=%s worst_work_us=%s target_frame_us=%s late_frames=%s worst_decode_us=%s worst_output_us=%s worst_render_us=%s\n' \
   "$playback_ok" "$playback_renderer" "$playback_output_mode" \
   "$playback_frames" "$playback_fps" \

@@ -442,6 +442,165 @@ static int decode_render_frame(
   return 1;
 }
 
+static int run_direct_plane_bench(
+    void *decoder, u32 expected_frames_per_iteration) {
+  u32 total_frames = 0;
+  u32 frames_per_iteration = 0;
+  u32 sample_count = 0;
+  u64 total_ticks = 0;
+  u64 total_decode_ticks = 0;
+  u64 total_output_ticks = 0;
+  u64 min_ticks = ~0ULL;
+  u64 worst_ticks = 0;
+  u64 worst_decode_ticks = 0;
+  u64 worst_output_ticks = 0;
+  u32 worst_iter = 0;
+  u32 worst_frame_index = 0;
+  u32 worst_frame_no = 0;
+  u8 worst_frame_type = 0;
+  O3yvFrameInfo info;
+  O3yvEyePlanes left_planes;
+  O3yvEyePlanes right_planes;
+
+  for (int iter = 0; iter < O3YV_BENCH_ITERATIONS; iter++) {
+    int rc = o3yv_decoder_reset(decoder);
+    if (rc != 0) {
+      bench_log("direct_bench_result status=fail reason=reset rc=%ld\n",
+          (long)rc);
+      return rc;
+    }
+
+    u32 iter_frames = 0;
+    for (;;) {
+      const u64 start = svcGetSystemTick();
+      rc = o3yv_decoder_next_frame(decoder, &info);
+      const u64 after_decode = svcGetSystemTick();
+      if (rc == 0) {
+        break;
+      }
+      if (rc < 0) {
+        bench_log("direct_bench_result status=fail reason=decode rc=%ld\n",
+            (long)rc);
+        return rc;
+      }
+
+      rc = o3yv_decoder_current_frame_planes(
+          decoder, &left_planes, &right_planes);
+      const u64 after_output = svcGetSystemTick();
+      if (rc != 0) {
+        bench_log("direct_bench_result status=fail reason=planes rc=%ld\n",
+            (long)rc);
+        return rc;
+      }
+      if (sample_count >= MAX_BENCH_SAMPLES) {
+        bench_log("direct_bench_result status=fail reason=too_many_samples "
+                  "max=%u\n",
+            MAX_BENCH_SAMPLES);
+        return -1;
+      }
+      if (iter_frames >= MAX_BENCH_FRAMES) {
+        bench_log("direct_bench_result status=fail reason=too_many_frames "
+                  "max=%u\n",
+            MAX_BENCH_FRAMES);
+        return -1;
+      }
+
+      const u64 decode_elapsed = after_decode - start;
+      const u64 output_elapsed = after_output - after_decode;
+      const u64 elapsed = after_output - start;
+      g_bench_samples[sample_count++] = elapsed;
+      total_frames++;
+      total_ticks += elapsed;
+      total_decode_ticks += decode_elapsed;
+      total_output_ticks += output_elapsed;
+      if (elapsed < min_ticks) {
+        min_ticks = elapsed;
+      }
+      if (decode_elapsed > worst_decode_ticks) {
+        worst_decode_ticks = decode_elapsed;
+      }
+      if (output_elapsed > worst_output_ticks) {
+        worst_output_ticks = output_elapsed;
+      }
+      if (elapsed > worst_ticks) {
+        worst_ticks = elapsed;
+        worst_iter = (u32)iter;
+        worst_frame_index = iter_frames;
+        worst_frame_no = info.frame_no;
+        worst_frame_type = info.frame_type;
+      }
+      iter_frames++;
+    }
+
+    if (iter == 0) {
+      frames_per_iteration = iter_frames;
+    } else if (iter_frames != frames_per_iteration) {
+      bench_log("direct_bench_result status=fail reason=frame_count_changed "
+                "first=%lu iter_%d=%lu\n",
+          (unsigned long)frames_per_iteration,
+          iter,
+          (unsigned long)iter_frames);
+      return -1;
+    }
+  }
+
+  if (total_frames == 0 || frames_per_iteration == 0) {
+    bench_log("direct_bench_result status=fail reason=no_frames\n");
+    return -1;
+  }
+
+  qsort(g_bench_samples, sample_count, sizeof(g_bench_samples[0]), compare_u64);
+  const u64 mean_us = ticks_to_us(total_ticks) / (u64)total_frames;
+  const u64 decode_mean_us =
+      ticks_to_us(total_decode_ticks) / (u64)total_frames;
+  const u64 output_mean_us =
+      ticks_to_us(total_output_ticks) / (u64)total_frames;
+  const u64 min_us = ticks_to_us(min_ticks);
+  const u64 median_us =
+      ticks_to_us(percentile_ticks(g_bench_samples, sample_count, 50));
+  const u64 p95_us =
+      ticks_to_us(percentile_ticks(g_bench_samples, sample_count, 95));
+  const u64 worst_us = ticks_to_us(worst_ticks);
+  const u64 worst_decode_us = ticks_to_us(worst_decode_ticks);
+  const u64 worst_output_us = ticks_to_us(worst_output_ticks);
+  const int timing_ok = worst_us <= O3YV_TARGET_US;
+  const int frame_count_ok =
+      frames_per_iteration == expected_frames_per_iteration;
+  const int pass = timing_ok && frame_count_ok;
+
+  bench_log("direct_bench_result status=%s iterations=%d frames=%lu "
+            "frames_per_iteration=%lu output_mode=direct_planes "
+            "min_us=%llu mean_us=%llu decode_mean_us=%llu "
+            "output_mean_us=%llu median_us=%llu p95_us=%llu "
+            "worst_us=%llu worst_decode_us=%llu worst_output_us=%llu "
+            "target_us=%llu worst_iter=%lu worst_frame_index=%lu "
+            "worst_frame_no=%lu worst_frame_type=%u "
+            "expected_frames_per_iteration=%lu "
+            "timing_status=%s frame_count_status=%s\n",
+      pass ? "pass" : "fail",
+      O3YV_BENCH_ITERATIONS,
+      (unsigned long)total_frames,
+      (unsigned long)frames_per_iteration,
+      (unsigned long long)min_us,
+      (unsigned long long)mean_us,
+      (unsigned long long)decode_mean_us,
+      (unsigned long long)output_mean_us,
+      (unsigned long long)median_us,
+      (unsigned long long)p95_us,
+      (unsigned long long)worst_us,
+      (unsigned long long)worst_decode_us,
+      (unsigned long long)worst_output_us,
+      (unsigned long long)O3YV_TARGET_US,
+      (unsigned long)worst_iter,
+      (unsigned long)worst_frame_index,
+      (unsigned long)worst_frame_no,
+      (unsigned)worst_frame_type,
+      (unsigned long)expected_frames_per_iteration,
+      timing_ok ? "pass" : "fail",
+      frame_count_ok ? "pass" : "fail");
+  return 0;
+}
+
 static int play_one_pass(void *decoder, int collect_stats) {
   int rc = o3yv_decoder_reset(decoder);
   if (rc != 0) {
@@ -833,6 +992,7 @@ int main(int argc, char **argv) {
       timing_ok ? "pass" : "fail",
       output_ok ? "pass" : "fail");
   bench_log("%s\n", pass ? "PASS" : "FAIL");
+  (void)run_direct_plane_bench(decoder, frames_per_iteration);
   playback_loop(decoder);
 
 wait_exit:
