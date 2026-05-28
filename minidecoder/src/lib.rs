@@ -1572,7 +1572,7 @@ fn copy_mb_run_zero_mv(
     let mb_x = mb_index % MB_W;
     let mb_y = mb_index / MB_W;
     let row_mbs = (MB_W - mb_x).min(end_mb - mb_index);
-    if row_mbs >= 8 {
+    if row_mbs >= 4 {
       copy_mb_row_span_zero_mv(dst, src, mb_x, mb_y, row_mbs);
     } else {
       let row_end = mb_index + row_mbs;
