@@ -54,9 +54,6 @@ Passing the project performance target requires worst-frame timing below
 After the run, copy `sdmc:/o3yvbench.log` back to the host and check it with:
 
 ```sh
-expected_checksum=$(
-  tools/o3yv-old3ds-expected-checksum.sh tmp/reencode_lazy128_current.o3yv 8 \
-    | awk -F'checksum=' '/^old3ds_check_args/ { print $2 }'
-)
-tools/o3yv-old3ds-check-log.sh old3ds-bench.log 15000 100 "$expected_checksum"
+tools/o3yv-old3ds-verify-log.sh \
+  old3ds-bench.log tmp/reencode_lazy128_current.o3yv 8 15000
 ```
