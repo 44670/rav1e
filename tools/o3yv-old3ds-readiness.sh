@@ -22,6 +22,8 @@ fi
 
 input=${1:-tmp/reencode_lazy128_current.o3yv}
 missing=0
+have_nightly=0
+have_rust_src=0
 
 check_file() {
   local label=$1
@@ -55,6 +57,81 @@ check_command() {
   fi
 }
 
+check_rust_nightly() {
+  if ! command -v rustup >/dev/null 2>&1; then
+    echo "MISS command: rustup" >&2
+    missing=1
+    return
+  fi
+  echo "PASS command: rustup ($(command -v rustup))"
+
+  if ! command -v rustc >/dev/null 2>&1; then
+    echo "MISS command: rustc" >&2
+    missing=1
+    return
+  fi
+  echo "PASS command: rustc ($(command -v rustc))"
+
+  if rustup toolchain list | awk '{ print $1 }' \
+    | grep -Eq '^nightly($|-)'; then
+    echo "PASS Rust nightly toolchain"
+    have_nightly=1
+  else
+    echo "MISS Rust nightly toolchain" >&2
+    missing=1
+  fi
+
+  if (( have_nightly != 0 )); then
+    if rustup component list --toolchain nightly --installed \
+      2>/dev/null | awk '{ print $1 }' | grep -Fxq rust-src; then
+      echo "PASS nightly rust-src component"
+      have_rust_src=1
+    else
+      echo "MISS nightly rust-src component" >&2
+      missing=1
+    fi
+  else
+    echo "MISS nightly rust-src component (nightly missing)" >&2
+  fi
+
+  if rustc --print target-list | grep -Fxq armv6k-nintendo-3ds; then
+    echo "PASS rustc target descriptor: armv6k-nintendo-3ds"
+  else
+    echo "MISS rustc target descriptor: armv6k-nintendo-3ds" >&2
+    missing=1
+  fi
+}
+
+check_old3ds_rust_staticlib() {
+  local log=/tmp/o3yv-minidecoder-3dsffi-armv6k-build.log
+  if cargo +nightly build \
+    --manifest-path old3ds/minidecoder-3dsffi/Cargo.toml \
+    --release \
+    --no-default-features \
+    --target armv6k-nintendo-3ds \
+    -Zbuild-std=core,alloc \
+    --target-dir old3ds/build/readiness-rust-target \
+    >"$log" 2>&1; then
+    echo "PASS Old3DS Rust staticlib build"
+  else
+    echo "MISS Old3DS Rust staticlib build; see $log" >&2
+    cat "$log" >&2
+    missing=1
+  fi
+}
+
+check_old3ds_ffi_host() {
+  local log=/tmp/o3yv-minidecoder-3dsffi-check.log
+  if cargo check --manifest-path old3ds/minidecoder-3dsffi/Cargo.toml \
+    >"$log" 2>&1; then
+    echo "PASS Old3DS Rust FFI host check"
+  else
+    echo "MISS Old3DS Rust FFI host check; see $log" >&2
+    cat "$log" >&2
+    missing=1
+  fi
+}
+
 check_minidecoder_nostd() {
   local log=/tmp/o3yv-minidecoder-nostd-check.log
   if cargo check -p minidecoder --lib --no-default-features \
@@ -82,16 +159,27 @@ check_minidecoder_alloc_free_decode() {
 }
 
 check_file "representative stream" "$input"
+check_file "Old3DS harness C source" "old3ds/source/main.c"
+check_file "Old3DS Rust FFI crate" "old3ds/minidecoder-3dsffi/Cargo.toml"
+check_file "Old3DS build script" "tools/o3yv-old3ds-build-harness.sh"
 check_command cargo
 if command -v cargo >/dev/null 2>&1; then
   check_minidecoder_nostd
+  if [[ -f old3ds/minidecoder-3dsffi/Cargo.toml ]]; then
+    check_old3ds_ffi_host
+  fi
   if [[ -f "$input" ]]; then
     check_minidecoder_alloc_free_decode "$input"
   fi
 fi
+check_rust_nightly
+if (( have_nightly != 0 && have_rust_src != 0 )); then
+  check_old3ds_rust_staticlib
+fi
 check_command arm-none-eabi-gcc
 check_command makerom
 check_command 3dsxtool
+check_command make
 
 if [[ -n "${DEVKITPRO:-}" ]]; then
   check_dir DEVKITPRO "$DEVKITPRO"
@@ -115,10 +203,15 @@ if (( missing != 0 )); then
   cat >&2 <<'EOF'
 
 Old3DS hardware timing is not ready on this machine. Install devkitPro with
-devkitARM, libctru, makerom, and 3dsxtool, then add a 3DS timing harness that
-loads the representative stream and measures decode frame time on hardware.
+devkitARM, libctru, makerom, 3dsxtool, Rust nightly, and nightly rust-src.
+Then run:
+
+  tools/o3yv-old3ds-build-harness.sh
+
+and time the generated old3ds/build/o3yvbench.3dsx on actual Old3DS hardware.
 EOF
   exit 1
 fi
 
 echo "Old3DS homebrew toolchain prerequisites are present."
+echo "Build the hardware timing harness with tools/o3yv-old3ds-build-harness.sh"

@@ -1,0 +1,21 @@
+[package]
+name = "minidecoder-3dsffi"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+crate-type = ["staticlib"]
+
+[features]
+default = ["std"]
+std = ["minidecoder/std"]
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+
+[dependencies]
+minidecoder = { path = "../../minidecoder", default-features = false }
