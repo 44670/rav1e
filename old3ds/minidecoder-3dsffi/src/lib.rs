@@ -7,7 +7,7 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::c_void;
 use core::mem::{align_of, size_of};
 use core::{ptr, slice};
-use minidecoder::{Error, StreamDecoder, EYE_FRAME_BYTES};
+use minidecoder::{Error, EyeFrame, StreamDecoder, EYE_FRAME_BYTES};
 
 const O3YV_DONE: i32 = 0;
 const O3YV_FRAME: i32 = 1;
@@ -19,9 +19,8 @@ const O3YV_ERR_UNSUPPORTED: i32 = -5;
 
 #[cfg(not(feature = "std"))]
 unsafe extern "C" {
-  fn malloc(size: usize) -> *mut c_void;
-  fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
-  fn free(ptr: *mut c_void);
+  fn linearMemAlign(size: usize, alignment: usize) -> *mut c_void;
+  fn linearFree(ptr: *mut c_void);
 }
 
 #[cfg(not(feature = "std"))]
@@ -30,14 +29,12 @@ struct CAllocator;
 #[cfg(not(feature = "std"))]
 unsafe impl GlobalAlloc for CAllocator {
   unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-    if layout.align() > align_of::<usize>() {
-      return ptr::null_mut();
-    }
-    unsafe { malloc(layout.size().max(1)).cast::<u8>() }
+    let alignment = layout.align().max(0x80);
+    unsafe { linearMemAlign(layout.size().max(1), alignment).cast::<u8>() }
   }
 
   unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
-    unsafe { free(ptr.cast::<c_void>()) };
+    unsafe { linearFree(ptr.cast::<c_void>()) };
   }
 
   unsafe fn realloc(
@@ -46,10 +43,20 @@ unsafe impl GlobalAlloc for CAllocator {
     layout: Layout,
     new_size: usize,
   ) -> *mut u8 {
-    if layout.align() > align_of::<usize>() {
+    let new_ptr = unsafe {
+      self.alloc(Layout::from_size_align_unchecked(
+        new_size.max(1),
+        layout.align(),
+      ))
+    };
+    if new_ptr.is_null() {
       return ptr::null_mut();
     }
-    unsafe { realloc(ptr.cast::<c_void>(), new_size.max(1)).cast::<u8>() }
+    unsafe {
+      ptr::copy_nonoverlapping(ptr, new_ptr, layout.size().min(new_size));
+      self.dealloc(ptr, layout);
+    }
+    new_ptr
   }
 }
 
@@ -70,6 +77,16 @@ pub struct O3yvFrameInfo {
   frame_no: u32,
   frame_type: u8,
   reserved: [u8; 3],
+}
+
+#[repr(C)]
+pub struct O3yvEyePlanes {
+  y: *const u8,
+  y_len: usize,
+  cb: *const u8,
+  cb_len: usize,
+  cr: *const u8,
+  cr_len: usize,
 }
 
 #[no_mangle]
@@ -232,6 +249,31 @@ pub unsafe extern "C" fn o3yv_decoder_write_current_yuv420p(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn o3yv_decoder_current_frame_planes(
+  decoder: *const c_void,
+  left: *mut O3yvEyePlanes,
+  right: *mut O3yvEyePlanes,
+) -> i32 {
+  let Some(decoder) = decoder_ref(decoder) else {
+    return O3YV_ERR_NULL;
+  };
+  if left.is_null() || right.is_null() {
+    return O3YV_ERR_NULL;
+  }
+
+  match decoder.current_frame() {
+    Ok(frame) => {
+      unsafe {
+        ptr::write(left, eye_planes(&frame.left));
+        ptr::write(right, eye_planes(&frame.right));
+      }
+      O3YV_DONE
+    }
+    Err(err) => map_error(err),
+  }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn o3yv_decoder_drop(decoder: *mut c_void) {
   if decoder.is_null() {
     return;
@@ -248,6 +290,27 @@ fn decoder_mut<'a>(
     None
   } else {
     Some(unsafe { &mut *decoder.cast::<StreamDecoder<'static>>() })
+  }
+}
+
+fn decoder_ref<'a>(
+  decoder: *const c_void,
+) -> Option<&'a StreamDecoder<'static>> {
+  if decoder.is_null() {
+    None
+  } else {
+    Some(unsafe { &*decoder.cast::<StreamDecoder<'static>>() })
+  }
+}
+
+fn eye_planes(eye: &EyeFrame) -> O3yvEyePlanes {
+  O3yvEyePlanes {
+    y: eye.y.as_ptr(),
+    y_len: eye.y.len(),
+    cb: eye.cb.as_ptr(),
+    cb_len: eye.cb.len(),
+    cr: eye.cr.as_ptr(),
+    cr_len: eye.cr.len(),
   }
 }
 

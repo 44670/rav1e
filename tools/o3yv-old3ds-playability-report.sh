@@ -184,6 +184,7 @@ playback_status=$(kv_value "$playback_line" status)
 playback_frames=$(kv_value "$playback_line" frames)
 playback_fps=$(kv_value "$playback_line" fps)
 playback_renderer=$(kv_value "$playback_line" renderer)
+playback_output_mode=$(kv_value "$playback_line" output_mode)
 playback_target_reported=$(kv_value "$playback_line" target_frame_us)
 playback_mean_work_us=$(kv_value "$playback_line" mean_work_us)
 playback_worst_work_us=$(kv_value "$playback_line" worst_work_us)
@@ -193,8 +194,8 @@ playback_worst_render_us=$(kv_value "$playback_line" worst_render_us)
 playback_late_frames=$(kv_value "$playback_line" late_frames)
 
 for item in playback_status playback_frames playback_fps playback_renderer \
-  playback_target_reported playback_mean_work_us playback_worst_work_us \
-  playback_late_frames; do
+  playback_output_mode playback_target_reported playback_mean_work_us \
+  playback_worst_work_us playback_late_frames; do
   if [[ -z "${!item}" ]]; then
     echo "FAIL missing $item in playback_result" >&2
     exit 1
@@ -214,6 +215,7 @@ done
 playback_ok=fail
 if [[ "$playback_status" == "pass" ]] \
   && [[ "$playback_renderer" == "y2r" ]] \
+  && [[ "$playback_output_mode" == "direct_planes" ]] \
   && (( playback_frames == frames_per_iteration )) \
   && (( playback_fps == 24 )) \
   && (( playback_target_reported == playback_target_us )) \
@@ -247,8 +249,9 @@ printf 'bench_timing status=%s harness_status=%s timing_status=%s worst_us=%s ta
   "$bench_timing_ok" "$bench_status" "$bench_timing_status" \
   "$bench_worst_us" "$bench_target_us" \
   "${bench_decode_worst_us:-unknown}" "${bench_output_worst_us:-unknown}"
-printf 'playback status=%s renderer=%s frames=%s fps=%s mean_work_us=%s worst_work_us=%s target_frame_us=%s late_frames=%s worst_decode_us=%s worst_output_us=%s worst_render_us=%s\n' \
-  "$playback_ok" "$playback_renderer" "$playback_frames" "$playback_fps" \
+printf 'playback status=%s renderer=%s output_mode=%s frames=%s fps=%s mean_work_us=%s worst_work_us=%s target_frame_us=%s late_frames=%s worst_decode_us=%s worst_output_us=%s worst_render_us=%s\n' \
+  "$playback_ok" "$playback_renderer" "$playback_output_mode" \
+  "$playback_frames" "$playback_fps" \
   "$playback_mean_work_us" "$playback_worst_work_us" \
   "$playback_target_us" "$playback_late_frames" \
   "${playback_worst_decode_us:-unknown}" \

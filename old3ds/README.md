@@ -89,7 +89,7 @@ the rendered 24 fps playback pass separately:
 
 ```sh
 tools/o3yv-old3ds-check-playback-log.sh \
-  old3ds-bench.log 41666 100 24 y2r
+  old3ds-bench.log 41666 100 24 y2r direct_planes
 ```
 
 For a combined report that keeps the strict decoder result and playback result

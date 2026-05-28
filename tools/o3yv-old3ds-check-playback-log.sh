@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-usage: tools/o3yv-old3ds-check-playback-log.sh <old3ds-bench.log> [target_frame_us] [expected_frames] [expected_fps] [expected_renderer]
+usage: tools/o3yv-old3ds-check-playback-log.sh <old3ds-bench.log> [target_frame_us] [expected_frames] [expected_fps] [expected_renderer] [expected_output_mode]
 
 Checks the playback_result line written by o3yvbench.3dsx after the decoder
 benchmark. This validates whether the first rendered playback pass stayed
@@ -14,6 +14,7 @@ Defaults:
   expected_frames   unset
   expected_fps      24
   expected_renderer y2r
+  expected_output_mode direct_planes
 USAGE
 }
 
@@ -27,6 +28,7 @@ target_frame_us=${2:-41666}
 expected_frames=${3:-}
 expected_fps=${4:-24}
 expected_renderer=${5:-y2r}
+expected_output_mode=${6:-direct_planes}
 
 if [[ ! -f "$log" ]]; then
   echo "missing log: $log" >&2
@@ -62,6 +64,7 @@ status=$(value status)
 frames=$(value frames)
 fps=$(value fps)
 renderer=$(value renderer)
+output_mode=$(value output_mode)
 reported_target_frame_us=$(value target_frame_us)
 mean_work_us=$(value mean_work_us)
 mean_decode_us=$(value mean_decode_us)
@@ -103,6 +106,16 @@ fi
 if [[ "$renderer" != "$expected_renderer" ]]; then
   echo "FAIL renderer=$renderer expected=$expected_renderer" >&2
   exit 1
+fi
+if [[ -n "$expected_output_mode" ]]; then
+  if [[ -z "$output_mode" ]]; then
+    echo "FAIL missing output_mode in playback_result" >&2
+    exit 1
+  fi
+  if [[ "$output_mode" != "$expected_output_mode" ]]; then
+    echo "FAIL output_mode=$output_mode expected=$expected_output_mode" >&2
+    exit 1
+  fi
 fi
 if (( frames <= 0 )); then
   echo "FAIL invalid playback frame count: $frames" >&2
@@ -157,7 +170,7 @@ if (( worst_render_us > worst_work_us )); then
   exit 1
 fi
 
-printf 'PASS Old3DS playback: frames=%s fps=%s renderer=%s mean_work_us=%s mean_decode_us=%s mean_output_us=%s mean_render_us=%s worst_work_us=%s worst_decode_us=%s worst_output_us=%s worst_render_us=%s late_frames=%s target_frame_us=%s\n' \
-  "$frames" "$fps" "$renderer" "$mean_work_us" "$mean_decode_us" \
+printf 'PASS Old3DS playback: frames=%s fps=%s renderer=%s output_mode=%s mean_work_us=%s mean_decode_us=%s mean_output_us=%s mean_render_us=%s worst_work_us=%s worst_decode_us=%s worst_output_us=%s worst_render_us=%s late_frames=%s target_frame_us=%s\n' \
+  "$frames" "$fps" "$renderer" "${output_mode:-unknown}" "$mean_work_us" "$mean_decode_us" \
   "$mean_output_us" "$mean_render_us" "$worst_work_us" "$worst_decode_us" \
   "$worst_output_us" "$worst_render_us" "$late_frames" "$target_frame_us"

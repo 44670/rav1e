@@ -229,15 +229,15 @@ static void put_yuv_pixel_bgr8(
   fb[dst + 2] = clip_i32_to_u8(r);
 }
 
-static void render_eye_bgr8(const u8 *eye, gfx3dSide_t side) {
+static void render_eye_bgr8(const O3yvEyePlanes *eye, gfx3dSide_t side) {
   u8 *fb = gfxGetFramebuffer(GFX_TOP, side, NULL, NULL);
   if (!fb) {
     return;
   }
 
-  const u8 *y_plane = eye;
-  const u8 *cb_plane = y_plane + EYE_W * EYE_H;
-  const u8 *cr_plane = cb_plane + CHROMA_W * CHROMA_H;
+  const u8 *y_plane = eye->y;
+  const u8 *cb_plane = eye->cb;
+  const u8 *cr_plane = eye->cr;
 
   for (int y = 0; y < EYE_H; y += 2) {
     const int y_next = y + 1;
@@ -321,31 +321,35 @@ static Result wait_y2r_done(void) {
   return -1;
 }
 
-static int render_eye_y2r(const u8 *eye, gfx3dSide_t side) {
+static int render_eye_y2r(const O3yvEyePlanes *eye, gfx3dSide_t side) {
   u8 *fb = gfxGetFramebuffer(GFX_TOP, side, NULL, NULL);
   if (!fb) {
     return -1;
   }
+  if (!eye->y || !eye->cb || !eye->cr
+      || eye->y_len != EYE_W * EYE_H
+      || eye->cb_len != CHROMA_W * CHROMA_H
+      || eye->cr_len != CHROMA_W * CHROMA_H) {
+    return -2;
+  }
 
-  const u8 *y_plane = eye;
-  const u8 *cb_plane = y_plane + EYE_W * EYE_H;
-  const u8 *cr_plane = cb_plane + CHROMA_W * CHROMA_H;
-
-  GSPGPU_FlushDataCache((void *)eye, (u32)o3yv_eye_frame_bytes());
+  GSPGPU_FlushDataCache((void *)eye->y, (u32)eye->y_len);
+  GSPGPU_FlushDataCache((void *)eye->cb, (u32)eye->cb_len);
+  GSPGPU_FlushDataCache((void *)eye->cr, (u32)eye->cr_len);
   GSPGPU_FlushDataCache(fb, RGB24_FRAME_BYTES);
 
   Result rc = Y2RU_SetSendingY(
-      y_plane, EYE_W * EYE_H, EYE_W * 8, 0);
+      eye->y, EYE_W * EYE_H, EYE_W * 8, 0);
   if (!y2r_result_ok(rc)) {
     return (int)rc;
   }
   rc = Y2RU_SetSendingU(
-      cb_plane, CHROMA_W * CHROMA_H, CHROMA_W * 4, 0);
+      eye->cb, CHROMA_W * CHROMA_H, CHROMA_W * 4, 0);
   if (!y2r_result_ok(rc)) {
     return (int)rc;
   }
   rc = Y2RU_SetSendingV(
-      cr_plane, CHROMA_W * CHROMA_H, CHROMA_W * 4, 0);
+      eye->cr, CHROMA_W * CHROMA_H, CHROMA_W * 4, 0);
   if (!y2r_result_ok(rc)) {
     return (int)rc;
   }
@@ -369,7 +373,8 @@ static const char *playback_renderer_name(void) {
   return g_y2r_available ? "y2r" : "software_bgr8";
 }
 
-static void render_frame_yuv420p(const u8 *left, const u8 *right) {
+static void render_frame_planes(
+    const O3yvEyePlanes *left, const O3yvEyePlanes *right) {
   if (g_y2r_available) {
     const int left_rc = render_eye_y2r(left, GFX_LEFT);
     const int right_rc = left_rc == 0 ? render_eye_y2r(right, GFX_RIGHT) : 0;
@@ -409,9 +414,11 @@ static void pace_frame(u64 frame_start_ticks) {
 }
 
 static int decode_render_frame(
-    void *decoder, u8 *left, u8 *right, size_t eye_bytes,
+    void *decoder,
     u64 *decode_ticks, u64 *output_ticks, u64 *render_ticks) {
   O3yvFrameInfo info;
+  O3yvEyePlanes left_planes;
+  O3yvEyePlanes right_planes;
   const u64 start = svcGetSystemTick();
   int rc = o3yv_decoder_next_frame(decoder, &info);
   const u64 after_decode = svcGetSystemTick();
@@ -419,14 +426,14 @@ static int decode_render_frame(
     return rc;
   }
 
-  rc = o3yv_decoder_write_current_yuv420p(
-      decoder, left, eye_bytes, right, eye_bytes);
+  rc = o3yv_decoder_current_frame_planes(
+      decoder, &left_planes, &right_planes);
   const u64 after_output = svcGetSystemTick();
   if (rc != 0) {
     return rc;
   }
 
-  render_frame_yuv420p(left, right);
+  render_frame_planes(&left_planes, &right_planes);
   const u64 after_render = svcGetSystemTick();
 
   *decode_ticks = after_decode - start;
@@ -435,8 +442,7 @@ static int decode_render_frame(
   return 1;
 }
 
-static int play_one_pass(
-    void *decoder, u8 *left, u8 *right, size_t eye_bytes, int collect_stats) {
+static int play_one_pass(void *decoder, int collect_stats) {
   int rc = o3yv_decoder_reset(decoder);
   if (rc != 0) {
     if (collect_stats) {
@@ -467,8 +473,7 @@ static int play_one_pass(
     u64 output_ticks = 0;
     u64 render_ticks = 0;
     rc = decode_render_frame(
-        decoder, left, right, eye_bytes,
-        &decode_ticks, &output_ticks, &render_ticks);
+        decoder, &decode_ticks, &output_ticks, &render_ticks);
     if (rc == 0) {
       break;
     }
@@ -520,7 +525,8 @@ static int play_one_pass(
     const u64 worst_render_us = ticks_to_us(worst_render_ticks);
     const int timing_ok = worst_work_us <= PLAYBACK_TARGET_US;
     bench_log("playback_result status=%s frames=%lu fps=%llu "
-              "renderer=%s target_frame_us=%llu mean_work_us=%llu "
+              "renderer=%s output_mode=direct_planes "
+              "target_frame_us=%llu mean_work_us=%llu "
               "mean_decode_us=%llu mean_output_us=%llu mean_render_us=%llu "
               "worst_work_us=%llu worst_decode_us=%llu "
               "worst_output_us=%llu worst_render_us=%llu late_frames=%lu\n",
@@ -543,16 +549,15 @@ static int play_one_pass(
   return 0;
 }
 
-static void playback_loop(
-    void *decoder, u8 *left, u8 *right, size_t eye_bytes) {
+static void playback_loop(void *decoder) {
   g_y2r_available = init_y2r_playback();
   bench_log("playback: top stereo %s, %llu fps, START exits\n",
       playback_renderer_name(),
       (unsigned long long)PLAYBACK_TARGET_FPS);
-  (void)play_one_pass(decoder, left, right, eye_bytes, 1);
+  (void)play_one_pass(decoder, 1);
   bench_log("playback_loop: looping until START\n");
   while (aptMainLoop()) {
-    if (play_one_pass(decoder, left, right, eye_bytes, 0) != 0) {
+    if (play_one_pass(decoder, 0) != 0) {
       break;
     }
   }
@@ -828,7 +833,7 @@ int main(int argc, char **argv) {
       timing_ok ? "pass" : "fail",
       output_ok ? "pass" : "fail");
   bench_log("%s\n", pass ? "PASS" : "FAIL");
-  playback_loop(decoder, left, right, eye_bytes);
+  playback_loop(decoder);
 
 wait_exit:
   if (decoder && decoder_initialized) {

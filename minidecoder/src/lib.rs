@@ -454,6 +454,13 @@ impl<'a> StreamDecoder<'a> {
     self.state.reference.right.write_yuv420p_into(right)?;
     Ok(())
   }
+
+  pub fn current_frame(&self) -> Result<&SbsFrame> {
+    if !self.state.has_reference {
+      return Err(Error::Invalid("no decoded frame available".into()));
+    }
+    Ok(&self.state.reference)
+  }
 }
 
 fn decode_next_frame<'state>(

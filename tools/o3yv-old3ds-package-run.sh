@@ -85,8 +85,9 @@ printf -v verify_bench_command \
   'tools/o3yv-old3ds-verify-log.sh %q %q %q %q' \
   "$out_dir/old3ds-bench.log" "$input" "$iterations" "$target_us"
 printf -v verify_playback_command \
-  'tools/o3yv-old3ds-check-playback-log.sh %q %q %q %q %q' \
-  "$out_dir/old3ds-bench.log" "41666" "$frames_per_iteration" "24" "y2r"
+  'tools/o3yv-old3ds-check-playback-log.sh %q %q %q %q %q %q' \
+  "$out_dir/old3ds-bench.log" "41666" "$frames_per_iteration" "24" \
+  "y2r" "direct_planes"
 printf -v report_command \
   'tools/o3yv-old3ds-playability-report.sh %q %q %q %q %q %q' \
   "$out_dir/old3ds-bench.log" "$input" "$iterations" "$target_us" \
@@ -114,6 +115,7 @@ manifest_kv() {
   manifest_kv playback_target_us 41666
   manifest_kv playback_fps 24
   manifest_kv playback_renderer y2r
+  manifest_kv playback_output_mode direct_planes
   manifest_kv expected_frames_per_iteration "$frames_per_iteration"
   manifest_kv expected_checksum "$checksum"
   manifest_kv o3yvbench_3dsx "$out_dir/o3yvbench.3dsx"
