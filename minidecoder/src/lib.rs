@@ -1346,7 +1346,7 @@ fn apply_block(
       while nz != 0 {
         let zz = nz.trailing_zeros() as usize;
         nz &= nz - 1;
-        coeffs[ZIGZAG[zz]] = residual.i8()? as i32;
+        store_coeff(&mut coeffs, zigzag_at(zz), residual.i8()? as i32);
       }
       add_idct_block(plane, stride, x, y, coeffs);
     }
@@ -1363,7 +1363,7 @@ fn apply_block(
         while nz != 0 {
           let zz = nz.trailing_zeros() as usize;
           nz &= nz - 1;
-          coeffs[ZIGZAG[zz]] = residual.i16()? as i32;
+          store_coeff(&mut coeffs, zigzag_at(zz), residual.i16()? as i32);
         }
         add_idct_block(plane, stride, x, y, coeffs);
       } else {
@@ -1393,7 +1393,7 @@ fn add_dc_block(
 
   let base = y * stride + x;
   if (DC_CLIP_DELTA_MIN..=DC_CLIP_DELTA_MAX).contains(&delta) {
-    let table = &DC_CLIP_TABLE[(delta - DC_CLIP_DELTA_MIN) as usize];
+    let table = dc_clip_table_at((delta - DC_CLIP_DELTA_MIN) as usize);
     add_dc_row4_table(plane, base, table);
     add_dc_row4_table(plane, base + stride, table);
     add_dc_row4_table(plane, base + stride * 2, table);
@@ -1408,18 +1408,18 @@ fn add_dc_block(
 
 #[inline(always)]
 fn add_dc_row4_table(plane: &mut [u8], idx: usize, table: &[u8; 256]) {
-  plane[idx] = table[plane[idx] as usize];
-  plane[idx + 1] = table[plane[idx + 1] as usize];
-  plane[idx + 2] = table[plane[idx + 2] as usize];
-  plane[idx + 3] = table[plane[idx + 3] as usize];
+  store_at(plane, idx, table_at(table, load_at(plane, idx)));
+  store_at(plane, idx + 1, table_at(table, load_at(plane, idx + 1)));
+  store_at(plane, idx + 2, table_at(table, load_at(plane, idx + 2)));
+  store_at(plane, idx + 3, table_at(table, load_at(plane, idx + 3)));
 }
 
 #[inline(always)]
 fn add_dc_row4(plane: &mut [u8], idx: usize, delta: i32) {
-  plane[idx] = clip_u8(plane[idx] as i32 + delta);
-  plane[idx + 1] = clip_u8(plane[idx + 1] as i32 + delta);
-  plane[idx + 2] = clip_u8(plane[idx + 2] as i32 + delta);
-  plane[idx + 3] = clip_u8(plane[idx + 3] as i32 + delta);
+  store_at(plane, idx, clip_u8(load_at(plane, idx) as i32 + delta));
+  store_at(plane, idx + 1, clip_u8(load_at(plane, idx + 1) as i32 + delta));
+  store_at(plane, idx + 2, clip_u8(load_at(plane, idx + 2) as i32 + delta));
+  store_at(plane, idx + 3, clip_u8(load_at(plane, idx + 3) as i32 + delta));
 }
 
 #[inline(always)]
@@ -1456,10 +1456,22 @@ fn idct_1d(c0: i32, c1: i32, c2: i32, c3: i32) -> (i32, i32, i32, i32) {
 fn add_idct_row(
   plane: &mut [u8], idx: usize, v0: i32, v1: i32, v2: i32, v3: i32,
 ) {
-  plane[idx] = clip_u8(plane[idx] as i32 + ((v0 + 4) >> 3));
-  plane[idx + 1] = clip_u8(plane[idx + 1] as i32 + ((v1 + 4) >> 3));
-  plane[idx + 2] = clip_u8(plane[idx + 2] as i32 + ((v2 + 4) >> 3));
-  plane[idx + 3] = clip_u8(plane[idx + 3] as i32 + ((v3 + 4) >> 3));
+  store_at(plane, idx, clip_u8(load_at(plane, idx) as i32 + ((v0 + 4) >> 3)));
+  store_at(
+    plane,
+    idx + 1,
+    clip_u8(load_at(plane, idx + 1) as i32 + ((v1 + 4) >> 3)),
+  );
+  store_at(
+    plane,
+    idx + 2,
+    clip_u8(load_at(plane, idx + 2) as i32 + ((v2 + 4) >> 3)),
+  );
+  store_at(
+    plane,
+    idx + 3,
+    clip_u8(load_at(plane, idx + 3) as i32 + ((v3 + 4) >> 3)),
+  );
 }
 
 pub fn prefill_eye(dst: &mut EyeFrame, src: &EyeFrame, mv: Mv) {
@@ -1736,6 +1748,46 @@ fn load_at(src: &[u8], off: usize) -> u8 {
   // SAFETY: Release callers pass offsets derived from fixed validated O3YV
   // geometry and clamped motion vectors.
   unsafe { *src.as_ptr().add(off) }
+}
+
+#[inline(always)]
+fn store_at(dst: &mut [u8], off: usize, value: u8) {
+  debug_assert!(off < dst.len());
+  // SAFETY: Release callers pass offsets derived from fixed validated O3YV
+  // geometry, fragment ranges, and coded-block masks.
+  unsafe {
+    dst.as_mut_ptr().add(off).write(value);
+  }
+}
+
+#[inline(always)]
+fn table_at(table: &[u8; 256], sample: u8) -> u8 {
+  // SAFETY: sample is a u8, so it is always a valid 0..256 table index.
+  unsafe { *table.as_ptr().add(sample as usize) }
+}
+
+#[inline(always)]
+fn dc_clip_table_at(index: usize) -> &'static [u8; 256] {
+  debug_assert!(index < DC_CLIP_TABLE.len());
+  // SAFETY: add_dc_block only passes indices after checking that delta is
+  // inside the precomputed DC clip table range.
+  unsafe { &*DC_CLIP_TABLE.as_ptr().add(index) }
+}
+
+#[inline(always)]
+fn zigzag_at(index: usize) -> usize {
+  debug_assert!(index < ZIGZAG.len());
+  // SAFETY: nz_mask is u16, so trailing_zeros for nonzero masks is 0..16.
+  unsafe { *ZIGZAG.as_ptr().add(index) }
+}
+
+#[inline(always)]
+fn store_coeff(coeffs: &mut [i32; 16], index: usize, value: i32) {
+  debug_assert!(index < coeffs.len());
+  // SAFETY: zigzag_at returns entries from the 16-element zigzag table.
+  unsafe {
+    coeffs.as_mut_ptr().add(index).write(value);
+  }
 }
 
 #[inline(always)]
