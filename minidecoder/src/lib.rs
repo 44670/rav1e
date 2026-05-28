@@ -1365,7 +1365,7 @@ fn apply_block(
         let samples = residual.take(16)?;
         for row in 0..4 {
           let dst = (y + row) * stride + x;
-          copy_at::<4>(plane, dst, samples, row * 4);
+          copy_at_4(plane, dst, samples, row * 4);
         }
       }
     }
@@ -1623,12 +1623,12 @@ fn copy_mb_zero_mv(dst: &mut EyeFrame, src: &EyeFrame, mb_index: usize) {
 
   for row in 0..16 {
     let off = (y_y + row) * EYE_W + y_x;
-    copy_at::<16>(&mut dst.y, off, &src.y, off);
+    copy_at_16(&mut dst.y, off, &src.y, off);
   }
   for row in 0..8 {
     let off = (c_y + row) * CHROMA_W + c_x;
-    copy_at::<8>(&mut dst.cb, off, &src.cb, off);
-    copy_at::<8>(&mut dst.cr, off, &src.cr, off);
+    copy_at_8(&mut dst.cb, off, &src.cb, off);
+    copy_at_8(&mut dst.cr, off, &src.cr, off);
   }
 }
 
@@ -1793,6 +1793,46 @@ fn copy_at<const N: usize>(
       dst.as_mut_ptr().add(dst_off),
       N,
     );
+  }
+}
+
+#[inline(always)]
+fn copy_at_4(dst: &mut [u8], dst_off: usize, src: &[u8], src_off: usize) {
+  debug_assert!(dst_off + 4 <= dst.len());
+  debug_assert!(src_off + 4 <= src.len());
+  // SAFETY: Callers pass validated fixed-size rows; unaligned access is used
+  // because Vec<u8> only guarantees byte alignment.
+  unsafe {
+    let value = ptr::read_unaligned(src.as_ptr().add(src_off).cast::<u32>());
+    ptr::write_unaligned(dst.as_mut_ptr().add(dst_off).cast::<u32>(), value);
+  }
+}
+
+#[inline(always)]
+fn copy_at_8(dst: &mut [u8], dst_off: usize, src: &[u8], src_off: usize) {
+  debug_assert!(dst_off + 8 <= dst.len());
+  debug_assert!(src_off + 8 <= src.len());
+  // SAFETY: Callers pass validated fixed-size rows; unaligned access is used
+  // because Vec<u8> only guarantees byte alignment.
+  unsafe {
+    let value = ptr::read_unaligned(src.as_ptr().add(src_off).cast::<u64>());
+    ptr::write_unaligned(dst.as_mut_ptr().add(dst_off).cast::<u64>(), value);
+  }
+}
+
+#[inline(always)]
+fn copy_at_16(dst: &mut [u8], dst_off: usize, src: &[u8], src_off: usize) {
+  debug_assert!(dst_off + 16 <= dst.len());
+  debug_assert!(src_off + 16 <= src.len());
+  // SAFETY: Callers pass validated fixed-size rows; unaligned access is used
+  // because Vec<u8> only guarantees byte alignment.
+  unsafe {
+    let src_ptr = src.as_ptr().add(src_off).cast::<u64>();
+    let dst_ptr = dst.as_mut_ptr().add(dst_off).cast::<u64>();
+    let a = ptr::read_unaligned(src_ptr);
+    let b = ptr::read_unaligned(src_ptr.add(1));
+    ptr::write_unaligned(dst_ptr, a);
+    ptr::write_unaligned(dst_ptr.add(1), b);
   }
 }
 
