@@ -132,6 +132,17 @@ check_old3ds_ffi_host() {
   fi
 }
 
+check_old3ds_host_c() {
+  local log=/tmp/o3yv-old3ds-host-c-check.log
+  if tools/o3yv-old3ds-host-c-check.sh >"$log" 2>&1; then
+    echo "PASS Old3DS harness host C syntax check"
+  else
+    echo "MISS Old3DS harness host C syntax check; see $log" >&2
+    cat "$log" >&2
+    missing=1
+  fi
+}
+
 check_minidecoder_nostd() {
   local log=/tmp/o3yv-minidecoder-nostd-check.log
   if cargo check -p minidecoder --lib --no-default-features \
@@ -164,6 +175,7 @@ check_file "Old3DS Rust FFI crate" "old3ds/minidecoder-3dsffi/Cargo.toml"
 check_file "Old3DS build script" "tools/o3yv-old3ds-build-harness.sh"
 check_file "Old3DS bench log checker" "tools/o3yv-old3ds-check-log.sh"
 check_file "Old3DS expected checksum tool" "tools/o3yv-old3ds-expected-checksum.sh"
+check_file "Old3DS host C checker" "tools/o3yv-old3ds-host-c-check.sh"
 check_command cargo
 if command -v cargo >/dev/null 2>&1; then
   check_minidecoder_nostd
@@ -174,6 +186,7 @@ if command -v cargo >/dev/null 2>&1; then
     check_minidecoder_alloc_free_decode "$input"
   fi
 fi
+check_old3ds_host_c
 check_rust_nightly
 if (( have_nightly != 0 && have_rust_src != 0 )); then
   check_old3ds_rust_staticlib
