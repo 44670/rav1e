@@ -1052,22 +1052,28 @@ fn validate_segment_map(
     return Ok(());
   }
 
-  let mut r = Reader::new(bytes);
+  debug_assert!(mb_count <= MB_COUNT);
+  let mut pos = 0usize;
   let mut described = 0usize;
   while described < mb_count {
-    let run = r.u8()? as usize + 1;
-    let segment_id = r.u8()?;
+    let next_pos = pos + 2;
+    if next_pos > bytes.len() {
+      return Err(Error::Eof);
+    }
+    // SAFETY: next_pos <= bytes.len() proves both byte loads are in-bounds.
+    let ptr = unsafe { bytes.as_ptr().add(pos) };
+    let run = unsafe { *ptr } as usize + 1;
+    let segment_id = unsafe { *ptr.add(1) };
+    pos = next_pos;
     if segment_id >= segment_count {
       return Err(Error::Invalid("segment id out of range".into()));
     }
-    described = described
-      .checked_add(run)
-      .ok_or_else(|| Error::Invalid("segment map run overflow".into()))?;
+    described += run;
     if described > mb_count {
       return Err(Error::Invalid("segment map exceeds fragment".into()));
     }
   }
-  if r.remaining() != 0 {
+  if pos != bytes.len() {
     return Err(Error::Invalid("segment map was not fully consumed".into()));
   }
   Ok(())
