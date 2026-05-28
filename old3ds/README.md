@@ -1,10 +1,10 @@
 # O3YV Old3DS Timing Harness
 
-This directory contains the hardware timing path for the Rust O3YV decoder.
-It builds a `.3dsx` that embeds a representative O3YV stream as a binary
-asset, calls the Rust decoder through a C ABI, copies each decoded frame into
-two reusable YUV420P eye buffers, and reports total and worst-frame decode time
-on hardware.
+This directory contains the hardware timing and playback path for the Rust O3YV
+decoder. It builds a `.3dsx` that embeds a representative O3YV stream as a
+binary asset, calls the Rust decoder through a C ABI, copies each decoded frame
+into two reusable YUV420P eye buffers, reports total and worst-frame decode time
+on hardware, then plays the stream on the top stereo screen.
 
 The local qemu ARM Linux gate is still useful for regressions, but the project
 goal is only proven by running this harness on an actual Old3DS.
@@ -52,7 +52,7 @@ tools/o3yv-old3ds-package-run.sh
 
 ## Run
 
-Launch `o3yvbench.3dsx` on an Old3DS. The harness prints to the top-screen
+Launch `o3yvbench.3dsx` on an Old3DS. The harness prints to the bottom-screen
 console and writes the same benchmark output to `sdmc:/o3yvbench.log`:
 
 - frame count
@@ -63,7 +63,12 @@ console and writes the same benchmark output to `sdmc:/o3yvbench.log`:
 - top frames by worst observed decode/output time
 - a `bench_result ...` line for machine checking
 - expected and measured decoded-output checksums
+- a `playback_result ...` line for the first rendered playback pass
 - error code, if decoding fails
+
+After the benchmark, the top screen plays the embedded stereo stream at 24 fps
+using the 3DS Y2R hardware converter, with a slow software BGR8 renderer only
+as a fallback. Press START to exit.
 
 Passing the project performance target requires worst-frame timing below
 `15 ms` for the representative 800x240 SBS stream on Old3DS hardware.

@@ -1,4 +1,5 @@
 #include <3ds.h>
+#include <stdbool.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,14 @@
 #define MAX_BENCH_FRAMES 512
 #define TOP_FRAME_REPORT_COUNT 10
 #define LOG_PATH "sdmc:/o3yvbench.log"
+#define EYE_W 400
+#define EYE_H 240
+#define CHROMA_W 200
+#define CHROMA_H 120
+#define PLAYBACK_TARGET_FPS 24ULL
+#define PLAYBACK_TARGET_US (1000000ULL / PLAYBACK_TARGET_FPS)
+#define RGB24_FRAME_BYTES (EYE_W * EYE_H * 3)
+#define Y2R_TIMEOUT_NS 1000000000LL
 
 #ifndef O3YV_BENCH_ITERATIONS
 #define O3YV_BENCH_ITERATIONS 8
@@ -33,6 +42,9 @@ static u32 g_frame_sample_count[MAX_BENCH_FRAMES];
 static u32 g_frame_no[MAX_BENCH_FRAMES];
 static u8 g_frame_type[MAX_BENCH_FRAMES];
 static u8 g_frame_ranked[MAX_BENCH_FRAMES];
+static int g_y2r_initialized;
+static int g_y2r_available;
+static int g_y2r_warned;
 
 static void bench_log(const char *fmt, ...) {
   char buffer[512];
@@ -50,6 +62,10 @@ static void bench_log(const char *fmt, ...) {
 
 static u64 ticks_to_us(u64 ticks) {
   return (ticks * 1000000ULL) / (u64)SYSCLOCK_ARM11;
+}
+
+static u64 us_to_ticks(u64 us) {
+  return (us * (u64)SYSCLOCK_ARM11) / 1000000ULL;
 }
 
 static void print_us_as_ms(const char *label, u64 us) {
@@ -187,12 +203,368 @@ static void checksum_update_frame(
   checksum_update_bytes(state, right, eye_bytes);
 }
 
+static u8 clip_i32_to_u8(int value) {
+  if (value < 0) {
+    return 0;
+  }
+  if (value > 255) {
+    return 255;
+  }
+  return (u8)value;
+}
+
+static void put_yuv_pixel_bgr8(
+    u8 *fb, int x, int y, u8 y_sample, int cb, int cr) {
+  int yy = (int)y_sample - 16;
+  if (yy < 0) {
+    yy = 0;
+  }
+
+  const int r = (19077 * yy + 29372 * cr + 8192) >> 14;
+  const int g = (19077 * yy - 3494 * cb - 8739 * cr + 8192) >> 14;
+  const int b = (19077 * yy + 34610 * cb + 8192) >> 14;
+  const u32 dst = (u32)((EYE_H - 1 - y) + x * EYE_H) * 3u;
+  fb[dst] = clip_i32_to_u8(b);
+  fb[dst + 1] = clip_i32_to_u8(g);
+  fb[dst + 2] = clip_i32_to_u8(r);
+}
+
+static void render_eye_bgr8(const u8 *eye, gfx3dSide_t side) {
+  u8 *fb = gfxGetFramebuffer(GFX_TOP, side, NULL, NULL);
+  if (!fb) {
+    return;
+  }
+
+  const u8 *y_plane = eye;
+  const u8 *cb_plane = y_plane + EYE_W * EYE_H;
+  const u8 *cr_plane = cb_plane + CHROMA_W * CHROMA_H;
+
+  for (int y = 0; y < EYE_H; y += 2) {
+    const int y_next = y + 1;
+    const u8 *y_row0 = y_plane + y * EYE_W;
+    const u8 *y_row1 = y_plane + y_next * EYE_W;
+    const u8 *cb_row = cb_plane + (y / 2) * CHROMA_W;
+    const u8 *cr_row = cr_plane + (y / 2) * CHROMA_W;
+
+    for (int x = 0; x < EYE_W; x += 2) {
+      const int cx = x / 2;
+      const int cb = (int)cb_row[cx] - 128;
+      const int cr = (int)cr_row[cx] - 128;
+      put_yuv_pixel_bgr8(fb, x, y, y_row0[x], cb, cr);
+      put_yuv_pixel_bgr8(fb, x + 1, y, y_row0[x + 1], cb, cr);
+      put_yuv_pixel_bgr8(fb, x, y_next, y_row1[x], cb, cr);
+      put_yuv_pixel_bgr8(fb, x + 1, y_next, y_row1[x + 1], cb, cr);
+    }
+  }
+}
+
+static int y2r_result_ok(Result rc) {
+  return R_SUCCEEDED(rc);
+}
+
+static int init_y2r_playback(void) {
+  Result rc = y2rInit();
+  if (!y2r_result_ok(rc)) {
+    bench_log("playback_y2r: init unavailable rc=0x%08lx\n", (unsigned long)rc);
+    return 0;
+  }
+
+  const Y2RU_ConversionParams params = {
+      .input_format = INPUT_YUV420_INDIV_8,
+      .output_format = OUTPUT_RGB_24,
+      .rotation = ROTATION_CLOCKWISE_90,
+      .block_alignment = BLOCK_LINE,
+      .input_line_width = EYE_W,
+      .input_lines = EYE_H,
+      .standard_coefficient = COEFFICIENT_ITU_R_BT_709_SCALING,
+      .unused = 0,
+      .alpha = 0xff,
+  };
+
+  rc = Y2RU_SetConversionParams(&params);
+  if (!y2r_result_ok(rc)) {
+    bench_log("playback_y2r: params failed rc=0x%08lx\n", (unsigned long)rc);
+    y2rExit();
+    return 0;
+  }
+  rc = Y2RU_SetTransferEndInterrupt(true);
+  if (!y2r_result_ok(rc)) {
+    bench_log(
+        "playback_y2r: interrupt failed rc=0x%08lx\n", (unsigned long)rc);
+    y2rExit();
+    return 0;
+  }
+
+  g_y2r_initialized = 1;
+  bench_log("playback_y2r: enabled\n");
+  return 1;
+}
+
+static Result wait_y2r_done(void) {
+  Handle end_event = 0;
+  Result rc = Y2RU_GetTransferEndEvent(&end_event);
+  if (y2r_result_ok(rc) && end_event) {
+    return svcWaitSynchronization(end_event, Y2R_TIMEOUT_NS);
+  }
+
+  for (int i = 0; i < 10000; i++) {
+    bool busy = true;
+    rc = Y2RU_IsBusyConversion(&busy);
+    if (!y2r_result_ok(rc)) {
+      return rc;
+    }
+    if (!busy) {
+      return 0;
+    }
+    svcSleepThread(100000LL);
+  }
+  return -1;
+}
+
+static int render_eye_y2r(const u8 *eye, gfx3dSide_t side) {
+  u8 *fb = gfxGetFramebuffer(GFX_TOP, side, NULL, NULL);
+  if (!fb) {
+    return -1;
+  }
+
+  const u8 *y_plane = eye;
+  const u8 *cb_plane = y_plane + EYE_W * EYE_H;
+  const u8 *cr_plane = cb_plane + CHROMA_W * CHROMA_H;
+
+  GSPGPU_FlushDataCache((void *)eye, (u32)o3yv_eye_frame_bytes());
+  GSPGPU_FlushDataCache(fb, RGB24_FRAME_BYTES);
+
+  Result rc = Y2RU_SetSendingY(
+      y_plane, EYE_W * EYE_H, EYE_W * 8, 0);
+  if (!y2r_result_ok(rc)) {
+    return (int)rc;
+  }
+  rc = Y2RU_SetSendingU(
+      cb_plane, CHROMA_W * CHROMA_H, CHROMA_W * 4, 0);
+  if (!y2r_result_ok(rc)) {
+    return (int)rc;
+  }
+  rc = Y2RU_SetSendingV(
+      cr_plane, CHROMA_W * CHROMA_H, CHROMA_W * 4, 0);
+  if (!y2r_result_ok(rc)) {
+    return (int)rc;
+  }
+  rc = Y2RU_SetReceiving(
+      fb, RGB24_FRAME_BYTES, EYE_H * 3 * 8, 0);
+  if (!y2r_result_ok(rc)) {
+    return (int)rc;
+  }
+  rc = Y2RU_StartConversion();
+  if (!y2r_result_ok(rc)) {
+    return (int)rc;
+  }
+  rc = wait_y2r_done();
+  if (!y2r_result_ok(rc)) {
+    return (int)rc;
+  }
+  return 0;
+}
+
+static const char *playback_renderer_name(void) {
+  return g_y2r_available ? "y2r" : "software_bgr8";
+}
+
+static void render_frame_yuv420p(const u8 *left, const u8 *right) {
+  if (g_y2r_available) {
+    const int left_rc = render_eye_y2r(left, GFX_LEFT);
+    const int right_rc = left_rc == 0 ? render_eye_y2r(right, GFX_RIGHT) : 0;
+    if (left_rc == 0 && right_rc == 0) {
+      gfxSwapBuffers();
+      return;
+    }
+
+    if (!g_y2r_warned) {
+      bench_log("playback_y2r: render failed left=%ld right=%ld; "
+                "falling back to software\n",
+          (long)left_rc,
+          (long)right_rc);
+      g_y2r_warned = 1;
+    }
+    g_y2r_available = 0;
+  }
+
+  render_eye_bgr8(left, GFX_LEFT);
+  render_eye_bgr8(right, GFX_RIGHT);
+  gfxFlushBuffers();
+  gfxSwapBuffers();
+}
+
+static void pace_frame(u64 frame_start_ticks) {
+  const u64 target_ticks = us_to_ticks(PLAYBACK_TARGET_US);
+  const u64 elapsed = svcGetSystemTick() - frame_start_ticks;
+  if (elapsed >= target_ticks) {
+    return;
+  }
+
+  const u64 remain_us = ticks_to_us(target_ticks - elapsed);
+  if (remain_us > 1000ULL) {
+    svcSleepThread((s64)((remain_us - 500ULL) * 1000ULL));
+  }
+  gspWaitForVBlank();
+}
+
+static int decode_render_frame(
+    void *decoder, u8 *left, u8 *right, size_t eye_bytes,
+    u64 *decode_ticks, u64 *output_ticks, u64 *render_ticks) {
+  O3yvFrameInfo info;
+  const u64 start = svcGetSystemTick();
+  int rc = o3yv_decoder_next_frame(decoder, &info);
+  const u64 after_decode = svcGetSystemTick();
+  if (rc <= 0) {
+    return rc;
+  }
+
+  rc = o3yv_decoder_write_current_yuv420p(
+      decoder, left, eye_bytes, right, eye_bytes);
+  const u64 after_output = svcGetSystemTick();
+  if (rc != 0) {
+    return rc;
+  }
+
+  render_frame_yuv420p(left, right);
+  const u64 after_render = svcGetSystemTick();
+
+  *decode_ticks = after_decode - start;
+  *output_ticks = after_output - after_decode;
+  *render_ticks = after_render - after_output;
+  return 1;
+}
+
+static int play_one_pass(
+    void *decoder, u8 *left, u8 *right, size_t eye_bytes, int collect_stats) {
+  int rc = o3yv_decoder_reset(decoder);
+  if (rc != 0) {
+    if (collect_stats) {
+      bench_log("playback_result status=fail reason=reset rc=%ld\n", (long)rc);
+    }
+    return rc;
+  }
+
+  u32 frames = 0;
+  u32 late_frames = 0;
+  u64 total_work_ticks = 0;
+  u64 total_decode_ticks = 0;
+  u64 total_output_ticks = 0;
+  u64 total_render_ticks = 0;
+  u64 worst_work_ticks = 0;
+  u64 worst_decode_ticks = 0;
+  u64 worst_output_ticks = 0;
+  u64 worst_render_ticks = 0;
+
+  while (aptMainLoop()) {
+    hidScanInput();
+    if (hidKeysDown() & KEY_START) {
+      return 0;
+    }
+
+    const u64 frame_start = svcGetSystemTick();
+    u64 decode_ticks = 0;
+    u64 output_ticks = 0;
+    u64 render_ticks = 0;
+    rc = decode_render_frame(
+        decoder, left, right, eye_bytes,
+        &decode_ticks, &output_ticks, &render_ticks);
+    if (rc == 0) {
+      break;
+    }
+    if (rc < 0) {
+      if (collect_stats) {
+        bench_log("playback_result status=fail reason=decode rc=%ld\n",
+            (long)rc);
+      }
+      return rc;
+    }
+
+    const u64 work_ticks = decode_ticks + output_ticks + render_ticks;
+    total_work_ticks += work_ticks;
+    total_decode_ticks += decode_ticks;
+    total_output_ticks += output_ticks;
+    total_render_ticks += render_ticks;
+    if (work_ticks > worst_work_ticks) {
+      worst_work_ticks = work_ticks;
+    }
+    if (decode_ticks > worst_decode_ticks) {
+      worst_decode_ticks = decode_ticks;
+    }
+    if (output_ticks > worst_output_ticks) {
+      worst_output_ticks = output_ticks;
+    }
+    if (render_ticks > worst_render_ticks) {
+      worst_render_ticks = render_ticks;
+    }
+    if (ticks_to_us(work_ticks) > PLAYBACK_TARGET_US) {
+      late_frames++;
+    }
+    frames++;
+    pace_frame(frame_start);
+  }
+
+  if (collect_stats) {
+    if (frames == 0) {
+      bench_log("playback_result status=fail reason=no_frames\n");
+      return -1;
+    }
+
+    const u64 mean_work_us = ticks_to_us(total_work_ticks) / frames;
+    const u64 mean_decode_us = ticks_to_us(total_decode_ticks) / frames;
+    const u64 mean_output_us = ticks_to_us(total_output_ticks) / frames;
+    const u64 mean_render_us = ticks_to_us(total_render_ticks) / frames;
+    const u64 worst_work_us = ticks_to_us(worst_work_ticks);
+    const u64 worst_decode_us = ticks_to_us(worst_decode_ticks);
+    const u64 worst_output_us = ticks_to_us(worst_output_ticks);
+    const u64 worst_render_us = ticks_to_us(worst_render_ticks);
+    const int timing_ok = worst_work_us <= PLAYBACK_TARGET_US;
+    bench_log("playback_result status=%s frames=%lu fps=%llu "
+              "renderer=%s target_frame_us=%llu mean_work_us=%llu "
+              "mean_decode_us=%llu mean_output_us=%llu mean_render_us=%llu "
+              "worst_work_us=%llu worst_decode_us=%llu "
+              "worst_output_us=%llu worst_render_us=%llu late_frames=%lu\n",
+        timing_ok ? "pass" : "fail",
+        (unsigned long)frames,
+        (unsigned long long)PLAYBACK_TARGET_FPS,
+        playback_renderer_name(),
+        (unsigned long long)PLAYBACK_TARGET_US,
+        (unsigned long long)mean_work_us,
+        (unsigned long long)mean_decode_us,
+        (unsigned long long)mean_output_us,
+        (unsigned long long)mean_render_us,
+        (unsigned long long)worst_work_us,
+        (unsigned long long)worst_decode_us,
+        (unsigned long long)worst_output_us,
+        (unsigned long long)worst_render_us,
+        (unsigned long)late_frames);
+  }
+
+  return 0;
+}
+
+static void playback_loop(
+    void *decoder, u8 *left, u8 *right, size_t eye_bytes) {
+  g_y2r_available = init_y2r_playback();
+  bench_log("playback: top stereo %s, %llu fps, START exits\n",
+      playback_renderer_name(),
+      (unsigned long long)PLAYBACK_TARGET_FPS);
+  (void)play_one_pass(decoder, left, right, eye_bytes, 1);
+  bench_log("playback_loop: looping until START\n");
+  while (aptMainLoop()) {
+    if (play_one_pass(decoder, left, right, eye_bytes, 0) != 0) {
+      break;
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
 
   gfxInitDefault();
-  consoleInit(GFX_TOP, NULL);
+  gfxSet3D(true);
+  consoleInit(GFX_BOTTOM, NULL);
   g_log_file = fopen(LOG_PATH, "w");
 
   bench_log("O3YV Old3DS decoder bench\n");
@@ -456,6 +828,7 @@ int main(int argc, char **argv) {
       timing_ok ? "pass" : "fail",
       output_ok ? "pass" : "fail");
   bench_log("%s\n", pass ? "PASS" : "FAIL");
+  playback_loop(decoder, left, right, eye_bytes);
 
 wait_exit:
   if (decoder && decoder_initialized) {
@@ -473,6 +846,10 @@ wait_exit:
   if (g_log_file) {
     fclose(g_log_file);
     g_log_file = NULL;
+  }
+  if (g_y2r_initialized) {
+    y2rExit();
+    g_y2r_initialized = 0;
   }
 
   printf("Press START to exit.\n");

@@ -59,7 +59,10 @@ sha256sum "$out_dir/o3yvbench.3dsx" >"$out_dir/o3yvbench.3dsx.sha256"
 
 cat >"$out_dir/RUN_ON_OLD3DS.txt" <<EOF
 Copy o3yvbench.3dsx to the Old3DS SD card and launch it from the Homebrew
-Launcher. The harness writes its machine-readable log to:
+Launcher. The harness first writes decoder benchmark timing, then starts
+24 fps top-screen Y2R playback. Wait for playback to start before exiting.
+
+The machine-readable log is written to:
 
   sdmc:/o3yvbench.log
 
@@ -67,6 +70,10 @@ After the run, copy that log back beside this bundle as old3ds-bench.log and
 verify timing/output determinism from the repository root with:
 
   tools/o3yv-old3ds-verify-log.sh "$out_dir/old3ds-bench.log" "$input" "$iterations" "$target_us"
+
+For playback timing, inspect:
+
+  grep '^playback_result ' "$out_dir/old3ds-bench.log"
 
 Passing target:
 
