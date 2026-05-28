@@ -471,21 +471,25 @@ fn decode_next_frame<'state>(
   if r.remaining() == 0 {
     return Ok(None);
   }
+  if r.remaining() < FRAME_HEADER_SIZE {
+    return Err(Error::Eof);
+  }
 
   let frame_start = r.pos;
-  let start_code = r.u32()?;
+  r.pos += FRAME_HEADER_SIZE;
+  // SAFETY: remaining() >= FRAME_HEADER_SIZE proves the fixed frame header is
+  // in-bounds. The variable payload bounds are checked before use below.
+  let header = unsafe { r.bytes.as_ptr().add(frame_start) };
+  let start_code = unsafe { load_u32_le(header) };
   if start_code != FRAME_MAGIC {
     return Err(Error::Invalid("bad frame start code".into()));
   }
-  let frame_size = r.u32()? as usize;
-  let frame_no = r.u32()?;
-  let _pts_ticks = r.u32()?;
-  let frame_type = r.u8()?;
-  let tile_count = r.u8()?;
-  let flags = r.u8()?;
-  let reserved = r.u8()?;
-  let _crc = r.u32()?;
-  let _cost = r.u32()?;
+  let frame_size = unsafe { load_u32_le(header.add(4)) } as usize;
+  let frame_no = unsafe { load_u32_le(header.add(8)) };
+  let frame_type = unsafe { *header.add(16) };
+  let tile_count = unsafe { *header.add(17) };
+  let flags = unsafe { *header.add(18) };
+  let reserved = unsafe { *header.add(19) };
 
   if flags != 0 || reserved != 0 {
     return Err(Error::Invalid(format!(
