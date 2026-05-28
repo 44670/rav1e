@@ -143,6 +143,8 @@ With Azahar installed at `/opt/3ds/azahar` and `DISPLAY=:0`, the host can run
 an emulator timing pass and a visual smoke check:
 
 ```sh
+tools/o3yv-azahar-config-summary.sh
+
 tools/o3yv-azahar-run-bench.sh \
   tmp/o3yv-old3ds-playable/o3yvbench.3dsx \
   tmp/azahar-old3ds-y2r-playback.log 120 playback_result
@@ -162,6 +164,10 @@ tools/o3yv-azahar-visual-smoke.sh \
 
 tools/o3yv-old3ds-bundle-status.sh tmp/o3yv-old3ds-playable
 ```
+
+The repeat summary records the Azahar config and is only accepted as current
+Old3DS-mode evidence when `is_new_3ds=false`, `cpu_clock_percentage=100`, and
+`simulate_3ds_gpu_timings=true`.
 
 Azahar evidence can only support `playability_status=plausible`; final proof
 requires the same report against a real Old3DS `sdmc:/o3yvbench.log`.

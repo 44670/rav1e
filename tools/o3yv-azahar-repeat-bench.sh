@@ -87,6 +87,19 @@ max_uint() {
 
 mkdir -p "$out_dir"
 
+summary="$out_dir/summary.txt"
+config_line=$(tools/o3yv-azahar-config-summary.sh || true)
+config_status=$(kv_value "$config_line" status)
+if [[ "${config_status:-fail}" != "pass" ]]; then
+  {
+    printf '%s\n' "${config_line:-azahar_config status=fail reason=no_output config=unknown display=${DISPLAY:-:0} is_new_3ds=unknown cpu_clock_percentage=unknown simulate_3ds_gpu_timings=unknown use_cpu_jit=unknown}"
+    printf 'azahar_repeat_summary status=fail runs=%s playback_pass=0 bench_output_pass=0 bench_timing_pass=0 direct_timing_pass=0 max_bench_worst_us=0 max_direct_worst_us=0 max_playback_worst_work_us=0 max_late_frames=0 checksum_status=unknown checksum=unknown out_dir=%s\n' \
+      "$runs" "$out_dir"
+  } >"$summary"
+  cat "$summary"
+  exit 1
+fi
+
 playback_pass=0
 bench_output_pass=0
 bench_timing_pass=0
@@ -167,8 +180,8 @@ if (( playback_pass == runs && bench_output_pass == runs \
   fi
 fi
 
-summary="$out_dir/summary.txt"
 {
+  printf '%s\n' "$config_line"
   printf 'azahar_repeat_summary status=%s runs=%s playback_pass=%s bench_output_pass=%s bench_timing_pass=%s direct_timing_pass=%s max_bench_worst_us=%s max_direct_worst_us=%s max_playback_worst_work_us=%s max_late_frames=%s checksum_status=%s checksum=%s out_dir=%s\n' \
     "$status" "$runs" "$playback_pass" "$bench_output_pass" \
     "$bench_timing_pass" "$direct_timing_pass" "$max_bench_worst_us" \

@@ -107,7 +107,21 @@ repeat_file="$bundle_dir/azahar-repeat-bench/summary.txt"
 repeat_status=missing
 repeat_checksum=unknown
 repeat_checksum_status=unknown
+repeat_config_status=missing
 if [[ -f "$repeat_file" ]]; then
+  repeat_config_line=$(grep '^azahar_config ' "$repeat_file" | tail -1 || true)
+  if [[ -n "$repeat_config_line" ]]; then
+    repeat_config_status=$(kv_value "$repeat_config_line" status)
+    repeat_config_reason=$(kv_value "$repeat_config_line" reason)
+    repeat_config_path=$(kv_value "$repeat_config_line" config)
+    repeat_config_display=$(kv_value "$repeat_config_line" display)
+    repeat_config_is_new_3ds=$(kv_value "$repeat_config_line" is_new_3ds)
+    repeat_config_cpu_clock=$(kv_value "$repeat_config_line" cpu_clock_percentage)
+    repeat_config_gpu_timings=$(
+      kv_value "$repeat_config_line" simulate_3ds_gpu_timings
+    )
+    repeat_config_jit=$(kv_value "$repeat_config_line" use_cpu_jit)
+  fi
   repeat_line=$(grep '^azahar_repeat_summary ' "$repeat_file" | tail -1 || true)
   if [[ -n "$repeat_line" ]]; then
     repeat_status=$(kv_value "$repeat_line" status)
@@ -126,7 +140,16 @@ if [[ -f "$repeat_file" ]]; then
     repeat_checksum=$(kv_value "$repeat_line" checksum)
     if [[ "${repeat_checksum,,}" != "${expected_checksum,,}" ]]; then
       repeat_status=stale
+    elif [[ "$repeat_config_status" != "pass" ]]; then
+      repeat_status="config_${repeat_config_status:-missing}"
     fi
+    printf 'azahar_config status=%s reason=%s config=%s display=%s is_new_3ds=%s cpu_clock_percentage=%s simulate_3ds_gpu_timings=%s use_cpu_jit=%s summary=%s\n' \
+      "$repeat_config_status" "${repeat_config_reason:-unknown}" \
+      "${repeat_config_path:-unknown}" "${repeat_config_display:-unknown}" \
+      "${repeat_config_is_new_3ds:-unknown}" \
+      "${repeat_config_cpu_clock:-unknown}" \
+      "${repeat_config_gpu_timings:-unknown}" \
+      "${repeat_config_jit:-unknown}" "$repeat_file"
     printf 'azahar_repeat status=%s runs=%s playback_pass=%s bench_output_pass=%s bench_timing_pass=%s direct_timing_pass=%s max_bench_worst_us=%s max_direct_worst_us=%s max_playback_worst_work_us=%s max_late_frames=%s checksum_status=%s checksum=%s expected_checksum=%s summary=%s\n' \
       "$repeat_status" "${repeat_runs:-unknown}" \
       "${repeat_playback_pass:-unknown}" \
@@ -141,9 +164,17 @@ if [[ -f "$repeat_file" ]]; then
       "$expected_checksum" "$repeat_file"
   else
     repeat_status=malformed
+    printf 'azahar_config status=%s reason=%s config=%s display=%s is_new_3ds=%s cpu_clock_percentage=%s simulate_3ds_gpu_timings=%s use_cpu_jit=%s summary=%s\n' \
+      "$repeat_config_status" "${repeat_config_reason:-unknown}" \
+      "${repeat_config_path:-unknown}" "${repeat_config_display:-unknown}" \
+      "${repeat_config_is_new_3ds:-unknown}" \
+      "${repeat_config_cpu_clock:-unknown}" \
+      "${repeat_config_gpu_timings:-unknown}" \
+      "${repeat_config_jit:-unknown}" "$repeat_file"
     printf 'azahar_repeat status=malformed summary=%s\n' "$repeat_file"
   fi
 else
+  printf 'azahar_config status=missing reason=missing_repeat_summary config=unknown display=unknown is_new_3ds=unknown cpu_clock_percentage=unknown simulate_3ds_gpu_timings=unknown use_cpu_jit=unknown summary=%s\n' "$repeat_file"
   printf 'azahar_repeat status=missing summary=%s\n' "$repeat_file"
 fi
 

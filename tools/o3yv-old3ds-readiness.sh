@@ -181,6 +181,7 @@ check_file "Old3DS playback log checker" "tools/o3yv-old3ds-check-playback-log.s
 check_file "Old3DS playability report" "tools/o3yv-old3ds-playability-report.sh"
 check_file "Old3DS bundle status report" "tools/o3yv-old3ds-bundle-status.sh"
 check_file "Old3DS SD handoff helper" "tools/o3yv-old3ds-sd-handoff.sh"
+check_file "Azahar config summary checker" "tools/o3yv-azahar-config-summary.sh"
 check_file "Azahar repeat timing checker" "tools/o3yv-azahar-repeat-bench.sh"
 check_file "Azahar visual smoke checker" "tools/o3yv-azahar-visual-smoke.sh"
 check_file "Old3DS expected checksum tool" "tools/o3yv-old3ds-expected-checksum.sh"

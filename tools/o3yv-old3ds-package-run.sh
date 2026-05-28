@@ -99,6 +99,8 @@ printf -v azahar_timing_command \
 printf -v azahar_visual_command \
   'tools/o3yv-azahar-visual-smoke.sh %q %q %q' \
   "$out_dir/o3yvbench.3dsx" "$out_dir/azahar-visual-smoke" "120"
+printf -v azahar_config_command \
+  'tools/o3yv-azahar-config-summary.sh'
 printf -v azahar_repeat_command \
   'tools/o3yv-azahar-repeat-bench.sh %q %q %q %q %q %q %q %q' \
   "$out_dir/o3yvbench.3dsx" "$out_dir/azahar-repeat-bench" "3" \
@@ -143,6 +145,7 @@ manifest_kv() {
   manifest_kv playability_report_command "$report_command"
   manifest_kv azahar_timing_command "$azahar_timing_command"
   manifest_kv azahar_visual_smoke_command "$azahar_visual_command"
+  manifest_kv azahar_config_command "$azahar_config_command"
   manifest_kv azahar_repeat_command "$azahar_repeat_command"
   manifest_kv bundle_status_command "$bundle_status_command"
   manifest_kv sd_detect_command "$sd_detect_command"
