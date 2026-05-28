@@ -82,6 +82,10 @@ For playback timing, inspect:
 
   tools/o3yv-old3ds-check-playback-log.sh "$out_dir/old3ds-bench.log" "41666" "$frames_per_iteration" "24" "y2r"
 
+For one combined playability report:
+
+  tools/o3yv-old3ds-playability-report.sh "$out_dir/old3ds-bench.log" "$input" "$iterations" "$target_us" "41666" "real_old3ds"
+
 Passing target:
 
   worst_us <= $target_us

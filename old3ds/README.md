@@ -87,3 +87,11 @@ the rendered 24 fps playback pass separately:
 tools/o3yv-old3ds-check-playback-log.sh \
   old3ds-bench.log 41666 100 24 y2r
 ```
+
+For a combined report that keeps the strict decoder result and playback result
+separate:
+
+```sh
+tools/o3yv-old3ds-playability-report.sh \
+  old3ds-bench.log tmp/reencode_lazy128_current.o3yv 8 15000 41666 real_old3ds
+```

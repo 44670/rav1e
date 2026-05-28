@@ -177,6 +177,7 @@ check_file "Old3DS devkitPro image fetcher" "tools/o3yv-old3ds-fetch-devkitpro-i
 check_file "Old3DS run bundle helper" "tools/o3yv-old3ds-package-run.sh"
 check_file "Old3DS bench log checker" "tools/o3yv-old3ds-check-log.sh"
 check_file "Old3DS playback log checker" "tools/o3yv-old3ds-check-playback-log.sh"
+check_file "Old3DS playability report" "tools/o3yv-old3ds-playability-report.sh"
 check_file "Old3DS expected checksum tool" "tools/o3yv-old3ds-expected-checksum.sh"
 check_file "Old3DS bench log verifier" "tools/o3yv-old3ds-verify-log.sh"
 check_file "Old3DS host C checker" "tools/o3yv-old3ds-host-c-check.sh"
