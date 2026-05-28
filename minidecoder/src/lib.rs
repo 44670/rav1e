@@ -2017,6 +2017,12 @@ fn copy_shifted_row_fixed<const W: usize>(
 
   if mv_x == 0 {
     copy_at::<W>(dst, dst_off, src, src_off);
+  } else if mv_x == 1 {
+    copy_at_len(dst, dst_off, src, src_off + 1, W - 1);
+    store_at(dst, dst_off + W - 1, load_at(src, src_off + W - 1));
+  } else if mv_x == -1 {
+    store_at(dst, dst_off, load_at(src, src_off));
+    copy_at_len(dst, dst_off + 1, src, src_off, W - 1);
   } else if mv_x > 0 {
     let shift = (mv_x as usize).min(W);
     let copy_len = W - shift;
