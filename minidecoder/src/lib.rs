@@ -1470,27 +1470,21 @@ pub fn prefill_eye(dst: &mut EyeFrame, src: &EyeFrame, mv: Mv) {
     return;
   }
 
-  motion_copy_plane(
+  motion_copy_plane_fixed::<EYE_W, EYE_H, EYE_Y_BYTES>(
     &mut dst.y,
     &src.y,
-    EYE_W,
-    EYE_H,
     mv.x as i32,
     mv.y as i32,
   );
-  motion_copy_plane(
+  motion_copy_plane_fixed::<CHROMA_W, CHROMA_H, EYE_CHROMA_BYTES>(
     &mut dst.cb,
     &src.cb,
-    CHROMA_W,
-    CHROMA_H,
     (mv.x as i32) >> 1,
     (mv.y as i32) >> 1,
   );
-  motion_copy_plane(
+  motion_copy_plane_fixed::<CHROMA_W, CHROMA_H, EYE_CHROMA_BYTES>(
     &mut dst.cr,
     &src.cr,
-    CHROMA_W,
-    CHROMA_H,
     (mv.x as i32) >> 1,
     (mv.y as i32) >> 1,
   );
@@ -1679,22 +1673,6 @@ fn round_div_i32(value: i32, divisor: i32) -> i32 {
   }
 }
 
-fn motion_copy_plane(
-  dst: &mut [u8], src: &[u8], w: usize, h: usize, mv_x: i32, mv_y: i32,
-) {
-  if mv_x == 0 && mv_y == 0 {
-    dst.copy_from_slice(src);
-    return;
-  }
-
-  for y in 0..h {
-    let sy = clamp_i32(y as i32 + mv_y, 0, h as i32 - 1) as usize;
-    let dst_row = &mut dst[y * w..(y + 1) * w];
-    let src_row = &src[sy * w..(sy + 1) * w];
-    copy_shifted_row(dst_row, src_row, mv_x);
-  }
-}
-
 #[inline(always)]
 fn copy_exact<const N: usize>(dst: &mut [u8], src: &[u8]) {
   debug_assert!(dst.len() >= N);
@@ -1720,23 +1698,95 @@ fn copy_at<const N: usize>(
   }
 }
 
-fn copy_shifted_row(dst: &mut [u8], src: &[u8], mv_x: i32) {
-  debug_assert_eq!(dst.len(), src.len());
-  let w = dst.len();
-  if mv_x == 0 {
-    dst.copy_from_slice(src);
-  } else if mv_x > 0 {
-    let shift = (mv_x as usize).min(w);
-    let copy_len = w - shift;
-    if copy_len > 0 {
-      dst[..copy_len].copy_from_slice(&src[shift..]);
+#[inline(always)]
+fn copy_at_len(
+  dst: &mut [u8], dst_off: usize, src: &[u8], src_off: usize, len: usize,
+) {
+  debug_assert!(dst_off + len <= dst.len());
+  debug_assert!(src_off + len <= src.len());
+  // SAFETY: Release callers pass offsets derived from fixed validated O3YV
+  // geometry and clamped motion vectors.
+  unsafe {
+    ptr::copy_nonoverlapping(
+      src.as_ptr().add(src_off),
+      dst.as_mut_ptr().add(dst_off),
+      len,
+    );
+  }
+}
+
+#[inline(always)]
+fn fill_at(dst: &mut [u8], off: usize, len: usize, value: u8) {
+  debug_assert!(off + len <= dst.len());
+  // SAFETY: Release callers pass offsets derived from fixed validated O3YV
+  // geometry and clamped motion vectors.
+  unsafe {
+    let ptr = dst.as_mut_ptr().add(off);
+    let mut i = 0usize;
+    while i < len {
+      ptr.add(i).write(value);
+      i += 1;
     }
-    dst[copy_len..].fill(src[w - 1]);
+  }
+}
+
+#[inline(always)]
+fn load_at(src: &[u8], off: usize) -> u8 {
+  debug_assert!(off < src.len());
+  // SAFETY: Release callers pass offsets derived from fixed validated O3YV
+  // geometry and clamped motion vectors.
+  unsafe { *src.as_ptr().add(off) }
+}
+
+#[inline(always)]
+fn motion_copy_plane_fixed<const W: usize, const H: usize, const N: usize>(
+  dst: &mut [u8], src: &[u8], mv_x: i32, mv_y: i32,
+) {
+  debug_assert_eq!(N, W * H);
+  debug_assert!(dst.len() >= N);
+  debug_assert!(src.len() >= N);
+
+  if mv_x == 0 && mv_y == 0 {
+    copy_exact::<N>(dst, src);
+    return;
+  }
+
+  let last_y = H as i32 - 1;
+  let mut y = 0usize;
+  let mut dst_off = 0usize;
+  while y < H {
+    let sy = clamp_i32(y as i32 + mv_y, 0, last_y) as usize;
+    copy_shifted_row_fixed::<W>(dst, dst_off, src, sy * W, mv_x);
+    y += 1;
+    dst_off += W;
+  }
+}
+
+#[inline(always)]
+fn copy_shifted_row_fixed<const W: usize>(
+  dst: &mut [u8], dst_off: usize, src: &[u8], src_off: usize, mv_x: i32,
+) {
+  debug_assert!(W > 0);
+  debug_assert!(dst_off + W <= dst.len());
+  debug_assert!(src_off + W <= src.len());
+
+  if mv_x == 0 {
+    copy_at::<W>(dst, dst_off, src, src_off);
+  } else if mv_x > 0 {
+    let shift = (mv_x as usize).min(W);
+    let copy_len = W - shift;
+    if copy_len > 0 {
+      copy_at_len(dst, dst_off, src, src_off + shift, copy_len);
+    }
+    let edge = load_at(src, src_off + W - 1);
+    fill_at(dst, dst_off + copy_len, shift, edge);
   } else {
-    let shift = ((-mv_x) as usize).min(w);
-    dst[..shift].fill(src[0]);
-    if shift < w {
-      dst[shift..].copy_from_slice(&src[..w - shift]);
+    let shift = ((-mv_x) as usize).min(W);
+    let edge = load_at(src, src_off);
+    fill_at(dst, dst_off, shift, edge);
+    let copy_len = W - shift;
+    if copy_len > 0 {
+      copy_at_len(dst, dst_off + shift, src, src_off, copy_len);
     }
   }
 }
