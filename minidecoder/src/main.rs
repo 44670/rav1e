@@ -679,6 +679,10 @@ struct StreamStats {
   lazy_base_tiles: usize,
   skip_mb: usize,
   copy16_mb: usize,
+  copy16_zero_mv_mb: usize,
+  copy16_x1_y0_mb: usize,
+  copy16_luma_inbounds_mb: usize,
+  copy16_chroma_zero_mb: usize,
   copy_vbs_mb: usize,
   lazy_base_copy_mb: usize,
   raw_mb: usize,
@@ -804,6 +808,14 @@ fn print_stream_stats(
     stats.lazy_base_copy_mb,
     stats.raw_mb,
     stats.residual_mb
+  );
+  eprintln!(
+    "stats copy16_motion zero_mv={} x1_y0={} luma_inbounds={} luma_clamped={} chroma_zero={}",
+    stats.copy16_zero_mv_mb,
+    stats.copy16_x1_y0_mb,
+    stats.copy16_luma_inbounds_mb,
+    stats.copy16_mb.saturating_sub(stats.copy16_luma_inbounds_mb),
+    stats.copy16_chroma_zero_mb
   );
   eprintln!(
     "stats blocks dc_only={} full_idct={} raw_4x4={}",
@@ -1205,6 +1217,7 @@ fn collect_fragment_stats(
     } else if (op & 0xf0) == 0x80 {
       collect_mb_stats(
         op & 0x0f,
+        mb_index,
         lazy_base_copy,
         &mut mr,
         &mut rr,
@@ -1221,6 +1234,7 @@ fn collect_fragment_stats(
       for _ in 0..run {
         collect_mb_stats(
           mode,
+          mb_index,
           lazy_base_copy,
           &mut mr,
           &mut rr,
@@ -1277,9 +1291,9 @@ fn collect_segment_map_stats(
 
 #[cfg(feature = "stats")]
 fn collect_mb_stats(
-  mode: u8, lazy_base_copy: bool, mode_stream: &mut StatsReader<'_>,
-  residual: &mut StatsReader<'_>, raw: &mut StatsReader<'_>,
-  stats: &mut StreamStats,
+  mode: u8, mb_index: usize, lazy_base_copy: bool,
+  mode_stream: &mut StatsReader<'_>, residual: &mut StatsReader<'_>,
+  raw: &mut StatsReader<'_>, stats: &mut StreamStats,
 ) -> Result<(), Box<dyn std::error::Error>> {
   match mode {
     minidecoder::MODE_BASE_RES => {
@@ -1291,13 +1305,17 @@ fn collect_mb_stats(
     }
     minidecoder::MODE_COPY16 => {
       stats.copy16_mb += 1;
-      mode_stream.skip(2)?;
+      let mv_x = mode_stream.i8()?;
+      let mv_y = mode_stream.i8()?;
+      record_copy16_mv_stats(mb_index, mv_x, mv_y, stats);
       Ok(())
     }
     minidecoder::MODE_COPY16_RES => {
       stats.copy16_mb += 1;
       stats.residual_mb += 1;
-      mode_stream.skip(2)?;
+      let mv_x = mode_stream.i8()?;
+      let mv_y = mode_stream.i8()?;
+      record_copy16_mv_stats(mb_index, mv_x, mv_y, stats);
       collect_residual_stats(residual, stats)
     }
     minidecoder::MODE_COPY16X8 | minidecoder::MODE_COPY8X16 => {
@@ -1328,6 +1346,36 @@ fn collect_mb_stats(
       Ok(())
     }
     _ => Err(format!("unsupported MB mode {mode}").into()),
+  }
+}
+
+#[cfg(feature = "stats")]
+fn record_copy16_mv_stats(
+  mb_index: usize, mv_x: i8, mv_y: i8, stats: &mut StreamStats,
+) {
+  if mv_x == 0 && mv_y == 0 {
+    stats.copy16_zero_mv_mb += 1;
+  }
+  if mv_x == 1 && mv_y == 0 {
+    stats.copy16_x1_y0_mb += 1;
+  }
+
+  let mb_x = mb_index % minidecoder::MB_W;
+  let mb_y = mb_index / minidecoder::MB_W;
+  let dst_x = mb_x * 16;
+  let dst_y = mb_y * 16;
+  let src_x = dst_x as i32 + mv_x as i32;
+  let src_y = dst_y as i32 + mv_y as i32;
+  if src_x >= 0
+    && src_y >= 0
+    && src_x as usize + 16 <= minidecoder::EYE_W
+    && src_y as usize + 16 <= minidecoder::EYE_H
+  {
+    stats.copy16_luma_inbounds_mb += 1;
+  }
+
+  if ((mv_x as i32) >> 1) == 0 && ((mv_y as i32) >> 1) == 0 {
+    stats.copy16_chroma_zero_mb += 1;
   }
 }
 
