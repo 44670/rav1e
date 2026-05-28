@@ -1383,14 +1383,43 @@ fn apply_block(
         if tag != TAG_RAW_4X4 {
           return Err(Error::Invalid("reserved RAW_4X4 tag bits set".into()));
         }
-        let samples = residual.take(16)?;
-        for row in 0..4 {
-          let dst = (y + row) * stride + x;
-          copy_at_4(plane, dst, samples, row * 4);
-        }
+        copy_raw_4x4_from_reader(plane, stride, x, y, residual)?;
       }
     }
     _ => unreachable!(),
+  }
+  Ok(())
+}
+
+#[inline(always)]
+fn copy_raw_4x4_from_reader(
+  plane: &mut [u8], stride: usize, x: usize, y: usize,
+  residual: &mut Reader<'_>,
+) -> Result<()> {
+  if residual.bytes.len() - residual.pos < 16 {
+    return Err(Error::Eof);
+  }
+  let start = residual.pos;
+  residual.pos += 16;
+
+  // SAFETY: The EOF check above proves all four input words are in-bounds.
+  // Block coordinates come from validated fixed O3YV geometry and coded-block
+  // masks, so the destination rows are in-bounds in release builds.
+  unsafe {
+    let src = residual.bytes.as_ptr().add(start);
+    let dst0 = y * stride + x;
+    let dst1 = dst0 + stride;
+    let dst2 = dst1 + stride;
+    let dst3 = dst2 + stride;
+    let dst = plane.as_mut_ptr();
+    let v0 = ptr::read_unaligned(src.cast::<u32>());
+    let v1 = ptr::read_unaligned(src.add(4).cast::<u32>());
+    let v2 = ptr::read_unaligned(src.add(8).cast::<u32>());
+    let v3 = ptr::read_unaligned(src.add(12).cast::<u32>());
+    ptr::write_unaligned(dst.add(dst0).cast::<u32>(), v0);
+    ptr::write_unaligned(dst.add(dst1).cast::<u32>(), v1);
+    ptr::write_unaligned(dst.add(dst2).cast::<u32>(), v2);
+    ptr::write_unaligned(dst.add(dst3).cast::<u32>(), v3);
   }
   Ok(())
 }
