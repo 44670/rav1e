@@ -6,9 +6,9 @@ usage() {
 usage: tools/o3yv-azahar-visual-smoke.sh <o3yvbench.3dsx> [out_dir] [timeout_seconds]
 
 Launches o3yvbench.3dsx in Azahar, waits for playback_result, captures two
-emulator-window screenshots, and checks that the video content is nonblank and
-changing. This is only a host/emulator visual smoke test; it is not hardware
-timing proof.
+emulator-window screenshots, and checks that the video content is nonblank,
+changing, and not red/blue-swapped for the current validation clip. This is
+only a host/emulator visual smoke test; it is not hardware timing proof.
 
 Defaults:
   out_dir          tmp/azahar-visual-smoke
@@ -18,6 +18,7 @@ Environment:
   AZAHAR           Azahar launcher path, default /opt/3ds/azahar
   AZAHAR_SDMC_DIR  Azahar sdmc directory, default ~/.local/share/azahar-emu/sdmc
   DISPLAY          X display, default :0
+  O3YV_AZAHAR_COLOR_CHECK  0 disables the validation-clip color-order check
 USAGE
 }
 
@@ -33,6 +34,9 @@ azahar=${AZAHAR:-/opt/3ds/azahar}
 display=${DISPLAY:-:0}
 sdmc_dir=${AZAHAR_SDMC_DIR:-"$HOME/.local/share/azahar-emu/sdmc"}
 sd_log="$sdmc_dir/o3yvbench.log"
+color_check=${O3YV_AZAHAR_COLOR_CHECK:-1}
+color_crop=${O3YV_AZAHAR_COLOR_CROP:-160x150+450+40}
+color_min_delta=${O3YV_AZAHAR_COLOR_MIN_R_MINUS_B:-0.05}
 
 if [[ ! -f "$rom" ]]; then
   echo "missing .3dsx: $rom" >&2
@@ -130,6 +134,17 @@ frame1_stddev=$(magick "$out_dir/content-1.png" -format '%[standard-deviation]' 
 frame2_stddev=$(magick "$out_dir/content-2.png" -format '%[standard-deviation]' info:)
 frame1_entropy=$(magick "$out_dir/content-1.png" -format '%[entropy]' info:)
 frame2_entropy=$(magick "$out_dir/content-2.png" -format '%[entropy]' info:)
+color_mean_r=0
+color_mean_g=0
+color_mean_b=0
+color_order_status=skip
+if [[ "$color_check" != 0 ]]; then
+  read -r color_mean_r color_mean_g color_mean_b < <(
+    magick "$out_dir/content-1.png" -crop "$color_crop" \
+      -format '%[fx:mean.r] %[fx:mean.g] %[fx:mean.b]\n' info:
+  )
+  color_order_status=pass
+fi
 rmse=$(
   compare -metric RMSE "$out_dir/content-1.png" "$out_dir/content-2.png" null: \
     2>&1 >/dev/null || true
@@ -154,6 +169,14 @@ fi
 if ! awk -v r="$rmse_normalized" 'BEGIN { exit !(r >= 0.001) }'; then
   status=fail
 fi
+if [[ "$color_order_status" == "pass" ]] && ! awk \
+  -v r="$color_mean_r" \
+  -v b="$color_mean_b" \
+  -v d="$color_min_delta" \
+  'BEGIN { exit !((r - b) >= d) }'; then
+  color_order_status=fail
+  status=fail
+fi
 
 {
   printf 'azahar_visual_smoke status=%s window_id=%s\n' "$status" "$window_id"
@@ -165,6 +188,9 @@ fi
     "$out_dir/content-2.png"
   printf 'diff ae=%s rmse=%s rmse_normalized=%s\n' \
     "$ae" "$rmse" "$rmse_normalized"
+  printf 'color_order status=%s crop=%s mean_r=%s mean_g=%s mean_b=%s min_r_minus_b=%s\n' \
+    "$color_order_status" "$color_crop" "$color_mean_r" "$color_mean_g" \
+    "$color_mean_b" "$color_min_delta"
   grep '^playback_result ' "$out_dir/o3yvbench.log" | tail -1
 } >"$report"
 
