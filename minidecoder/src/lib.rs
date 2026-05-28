@@ -1335,63 +1335,45 @@ fn apply_block(
   residual: &mut Reader<'_>,
 ) -> Result<()> {
   let tag = residual.u8()?;
-  match tag & 0xc0 {
-    0x00 => {
-      if tag != TAG_DC_ONLY_S8 {
-        return Err(Error::Invalid("reserved DC_ONLY_S8 tag bits set".into()));
-      }
-      let coeff = residual.i8()? as i32;
-      add_dc_block(plane, stride, x, y, coeff);
-    }
-    0x40 => {
-      if tag != TAG_DC_ONLY_S16 {
-        return Err(Error::Invalid(
-          "reserved DC_ONLY_S16 tag bits set".into(),
-        ));
-      }
-      let coeff = residual.i16()? as i32;
-      add_dc_block(plane, stride, x, y, coeff);
-    }
-    0x80 => {
-      if tag != TAG_AC_MASK_S8 {
-        return Err(Error::Invalid("reserved AC_MASK_S8 tag bits set".into()));
-      }
-      let mut coeffs = [0i32; 16];
-      let nz_mask = residual.u16()?;
-      let mut nz = nz_mask;
-      while nz != 0 {
-        let zz = nz.trailing_zeros() as usize;
-        nz &= nz - 1;
-        store_coeff(&mut coeffs, zigzag_at(zz), residual.i8()? as i32);
-      }
-      add_idct_block(plane, stride, x, y, coeffs);
-    }
-    0xc0 => {
-      if (tag & 0x20) == 0 {
-        if tag != TAG_AC_MASK_S16 {
-          return Err(Error::Invalid(
-            "reserved AC_MASK_S16 tag bits set".into(),
-          ));
-        }
-        let mut coeffs = [0i32; 16];
-        let nz_mask = residual.u16()?;
-        let mut nz = nz_mask;
-        while nz != 0 {
-          let zz = nz.trailing_zeros() as usize;
-          nz &= nz - 1;
-          store_coeff(&mut coeffs, zigzag_at(zz), residual.i16()? as i32);
-        }
-        add_idct_block(plane, stride, x, y, coeffs);
-      } else {
-        if tag != TAG_RAW_4X4 {
-          return Err(Error::Invalid("reserved RAW_4X4 tag bits set".into()));
-        }
-        copy_raw_4x4_from_reader(plane, stride, x, y, residual)?;
-      }
-    }
-    _ => unreachable!(),
+  if tag == TAG_RAW_4X4 {
+    copy_raw_4x4_from_reader(plane, stride, x, y, residual)?;
+    return Ok(());
   }
-  Ok(())
+  if tag == TAG_DC_ONLY_S8 {
+    let coeff = residual.i8()? as i32;
+    add_dc_block(plane, stride, x, y, coeff);
+    return Ok(());
+  }
+  if tag == TAG_DC_ONLY_S16 {
+    let coeff = residual.i16()? as i32;
+    add_dc_block(plane, stride, x, y, coeff);
+    return Ok(());
+  }
+  if tag == TAG_AC_MASK_S8 {
+    let mut coeffs = [0i32; 16];
+    let nz_mask = residual.u16()?;
+    let mut nz = nz_mask;
+    while nz != 0 {
+      let zz = nz.trailing_zeros() as usize;
+      nz &= nz - 1;
+      store_coeff(&mut coeffs, zigzag_at(zz), residual.i8()? as i32);
+    }
+    add_idct_block(plane, stride, x, y, coeffs);
+    return Ok(());
+  }
+  if tag == TAG_AC_MASK_S16 {
+    let mut coeffs = [0i32; 16];
+    let nz_mask = residual.u16()?;
+    let mut nz = nz_mask;
+    while nz != 0 {
+      let zz = nz.trailing_zeros() as usize;
+      nz &= nz - 1;
+      store_coeff(&mut coeffs, zigzag_at(zz), residual.i16()? as i32);
+    }
+    add_idct_block(plane, stride, x, y, coeffs);
+    return Ok(());
+  }
+  Err(Error::Invalid("reserved residual tag bits set".into()))
 }
 
 #[inline(always)]
@@ -2874,6 +2856,16 @@ mod tests {
 
     let mut res = Vec::new();
     put_u32(&mut res, 0x0100_0000);
+    let bytes = p_with_tiles(
+      vec![0x80 | MODE_BASE_RES, 0x7f, 0x7f, 0x78, 0],
+      res,
+      vec![],
+    );
+    assert!(decode_stream(&bytes).is_err());
+
+    let mut res = Vec::new();
+    put_u32(&mut res, 1);
+    res.push(TAG_DC_ONLY_S8 | 0x01);
     let bytes = p_with_tiles(
       vec![0x80 | MODE_BASE_RES, 0x7f, 0x7f, 0x78, 0],
       res,
