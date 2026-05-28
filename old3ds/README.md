@@ -114,6 +114,11 @@ tools/o3yv-old3ds-playability-report.sh \
   tmp/azahar-old3ds-y2r-playback.log \
   tmp/reencode_lazy128_current.o3yv 8 15000 41666 azahar_old3ds
 
+tools/o3yv-azahar-repeat-bench.sh \
+  tmp/o3yv-old3ds-playable/o3yvbench.3dsx \
+  tmp/azahar-repeat-bench 3 120 \
+  tmp/reencode_lazy128_current.o3yv 8 15000 41666
+
 tools/o3yv-azahar-visual-smoke.sh \
   tmp/o3yv-old3ds-playable/o3yvbench.3dsx \
   tmp/azahar-visual-smoke 120
