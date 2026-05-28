@@ -1500,6 +1500,11 @@ pub fn prefill_eye(dst: &mut EyeFrame, src: &EyeFrame, mv: Mv) {
 pub fn copy_mb_from_reference(
   dst: &mut EyeFrame, src: &EyeFrame, mb_index: usize, mv: Mv,
 ) {
+  if mv == Mv::ZERO {
+    copy_mb_zero_mv(dst, src, mb_index);
+    return;
+  }
+
   let mb_x = mb_index % MB_W;
   let mb_y = mb_index / MB_W;
   copy_rect(
@@ -1538,6 +1543,26 @@ pub fn copy_mb_from_reference(
     (mv.x as i32) >> 1,
     (mv.y as i32) >> 1,
   );
+}
+
+#[inline(always)]
+fn copy_mb_zero_mv(dst: &mut EyeFrame, src: &EyeFrame, mb_index: usize) {
+  let mb_x = mb_index % MB_W;
+  let mb_y = mb_index / MB_W;
+  let y_x = mb_x * 16;
+  let y_y = mb_y * 16;
+  let c_x = mb_x * 8;
+  let c_y = mb_y * 8;
+
+  for row in 0..16 {
+    let off = (y_y + row) * EYE_W + y_x;
+    copy_at::<16>(&mut dst.y, off, &src.y, off);
+  }
+  for row in 0..8 {
+    let off = (c_y + row) * CHROMA_W + c_x;
+    copy_at::<8>(&mut dst.cb, off, &src.cb, off);
+    copy_at::<8>(&mut dst.cr, off, &src.cr, off);
+  }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
