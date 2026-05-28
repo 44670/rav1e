@@ -95,3 +95,25 @@ separate:
 tools/o3yv-old3ds-playability-report.sh \
   old3ds-bench.log tmp/reencode_lazy128_current.o3yv 8 15000 41666 real_old3ds
 ```
+
+## Azahar Smoke Test
+
+With Azahar installed at `/opt/3ds/azahar` and `DISPLAY=:0`, the host can run
+an emulator timing pass and a visual smoke check:
+
+```sh
+tools/o3yv-azahar-run-bench.sh \
+  tmp/o3yv-old3ds-playable/o3yvbench.3dsx \
+  tmp/azahar-old3ds-y2r-playback.log 120 playback_result
+
+tools/o3yv-old3ds-playability-report.sh \
+  tmp/azahar-old3ds-y2r-playback.log \
+  tmp/reencode_lazy128_current.o3yv 8 15000 41666 azahar_old3ds
+
+tools/o3yv-azahar-visual-smoke.sh \
+  tmp/o3yv-old3ds-playable/o3yvbench.3dsx \
+  tmp/azahar-visual-smoke 120
+```
+
+Azahar evidence can only support `playability_status=plausible`; final proof
+requires the same report against a real Old3DS `sdmc:/o3yvbench.log`.
