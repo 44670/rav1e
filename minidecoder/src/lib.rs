@@ -1079,6 +1079,7 @@ fn validate_segment_map(
   Ok(())
 }
 
+#[inline(always)]
 fn validate_fragment_header(
   frag_tile_id: u8, tile_id: u8, flags: u8, crc: u32, row_start: u8,
   row_count: u8, start_mb: usize, mb_count: usize,
