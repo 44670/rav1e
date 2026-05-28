@@ -21,6 +21,7 @@ Default ceilings:
   O3YV_GATE_REP_MEDIAN_MS     0.60 ms/frame
   O3YV_GATE_REP_OUTPUT_MS     0.75 ms/frame
   O3YV_GATE_WORST_FRAME_MS    1.20 ms
+  O3YV_GATE_WORST_OUTPUT_MS   1.35 ms
   O3YV_GATE_STRESS_*_MS       per stress kind, see script
 USAGE
 }
@@ -54,6 +55,7 @@ max_p_work=${O3YV_GATE_MAX_P_WORK:-1000000}
 rep_median_ms=${O3YV_GATE_REP_MEDIAN_MS:-0.60}
 rep_output_ms=${O3YV_GATE_REP_OUTPUT_MS:-0.75}
 worst_frame_ms=${O3YV_GATE_WORST_FRAME_MS:-1.20}
+worst_output_ms=${O3YV_GATE_WORST_OUTPUT_MS:-1.35}
 
 metric() {
   local key=$1
@@ -143,6 +145,18 @@ worst_median=$(
     | metric median
 )
 check_le "worst-frame median ms" "$worst_median" "$worst_frame_ms"
+
+output_frame_output=$(
+  qemu-arm -cpu arm11mpcore "$arm_decoder" "$input" \
+    --bench-output-frames "$frame_iters" 2>&1
+)
+echo "$output_frame_output"
+worst_output_median=$(
+  printf '%s\n' "$output_frame_output" | awk '/^frame index=/ { print }' \
+    | head -1 | metric median
+)
+check_le "worst output-frame median ms" \
+  "$worst_output_median" "$worst_output_ms"
 
 echo
 echo "== arm qemu stress streams =="

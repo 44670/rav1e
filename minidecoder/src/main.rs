@@ -28,6 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if options.bench_iters.is_none()
       && options.bench_output_iters.is_none()
       && options.bench_frame_iters.is_none()
+      && options.bench_output_frame_iters.is_none()
       && options.output_checksum_iters.is_none()
       && options.output.is_none()
       && options.png_dir.is_none()
@@ -75,7 +76,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
           .into(),
       );
     }
-    run_frame_bench(&bytes, iterations)?;
+    run_frame_bench(&bytes, iterations, false)?;
+    return Ok(());
+  }
+
+  if let Some(iterations) = options.bench_output_frame_iters {
+    if options.output.is_some() || options.png_dir.is_some() {
+      return Err(
+        "--bench-output-frames cannot be combined with output.yuv or --png-dir"
+          .into(),
+      );
+    }
+    run_frame_bench(&bytes, iterations, true)?;
     return Ok(());
   }
 
@@ -130,6 +142,7 @@ struct Options {
   bench_iters: Option<usize>,
   bench_output_iters: Option<usize>,
   bench_frame_iters: Option<usize>,
+  bench_output_frame_iters: Option<usize>,
   output_checksum_iters: Option<usize>,
   stats: bool,
 }
@@ -141,6 +154,7 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
   let mut bench_iters = None;
   let mut bench_output_iters = None;
   let mut bench_frame_iters = None;
+  let mut bench_output_frame_iters = None;
   let mut output_checksum_iters = None;
   let mut stats = false;
 
@@ -154,10 +168,11 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
       "--bench" => {
         if bench_frame_iters.is_some()
           || bench_output_iters.is_some()
+          || bench_output_frame_iters.is_some()
           || output_checksum_iters.is_some()
         {
           return Err(
-            "--bench cannot be combined with --bench-output, --bench-frames, or --output-checksum"
+            "--bench cannot be combined with --bench-output, --bench-frames, --bench-output-frames, or --output-checksum"
               .into(),
           );
         }
@@ -173,10 +188,11 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
       "--bench-output" => {
         if bench_iters.is_some()
           || bench_frame_iters.is_some()
+          || bench_output_frame_iters.is_some()
           || output_checksum_iters.is_some()
         {
           return Err(
-            "--bench-output cannot be combined with --bench, --bench-frames, or --output-checksum"
+            "--bench-output cannot be combined with --bench, --bench-frames, --bench-output-frames, or --output-checksum"
               .into(),
           );
         }
@@ -194,10 +210,11 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
       "--bench-frames" => {
         if bench_iters.is_some()
           || bench_output_iters.is_some()
+          || bench_output_frame_iters.is_some()
           || output_checksum_iters.is_some()
         {
           return Err(
-            "--bench-frames cannot be combined with --bench, --bench-output, or --output-checksum"
+            "--bench-frames cannot be combined with --bench, --bench-output, --bench-output-frames, or --output-checksum"
               .into(),
           );
         }
@@ -212,13 +229,36 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
         }
         bench_frame_iters = Some(iterations);
       }
+      "--bench-output-frames" => {
+        if bench_iters.is_some()
+          || bench_output_iters.is_some()
+          || bench_frame_iters.is_some()
+          || output_checksum_iters.is_some()
+        {
+          return Err(
+            "--bench-output-frames cannot be combined with --bench, --bench-output, --bench-frames, or --output-checksum"
+              .into(),
+          );
+        }
+        let iterations = args
+          .next()
+          .ok_or("--bench-output-frames requires an iteration count")?
+          .parse::<usize>()?;
+        if iterations == 0 {
+          return Err(
+            "--bench-output-frames iteration count must be positive".into(),
+          );
+        }
+        bench_output_frame_iters = Some(iterations);
+      }
       "--output-checksum" => {
         if bench_iters.is_some()
           || bench_output_iters.is_some()
           || bench_frame_iters.is_some()
+          || bench_output_frame_iters.is_some()
         {
           return Err(
-            "--output-checksum cannot be combined with --bench, --bench-output, or --bench-frames"
+            "--output-checksum cannot be combined with --bench, --bench-output, --bench-frames, or --bench-output-frames"
               .into(),
           );
         }
@@ -258,6 +298,7 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
     bench_iters,
     bench_output_iters,
     bench_frame_iters,
+    bench_output_frame_iters,
     output_checksum_iters,
     stats,
   })
@@ -267,7 +308,7 @@ fn print_usage() {
   let stats = if cfg!(feature = "stats") { " [--stats]" } else { "" };
   let png = if cfg!(feature = "png") { " [--png-dir DIR]" } else { "" };
   eprintln!(
-    "usage: minidecoder <input.o3yv> [output.yuv]{png} [--bench N] [--bench-output N] [--bench-frames N] [--output-checksum N]{stats}"
+    "usage: minidecoder <input.o3yv> [output.yuv]{png} [--bench N] [--bench-output N] [--bench-frames N] [--bench-output-frames N] [--output-checksum N]{stats}"
   );
 }
 
@@ -478,19 +519,32 @@ impl OutputChecksum {
 }
 
 fn run_frame_bench(
-  bytes: &[u8], iterations: usize,
+  bytes: &[u8], iterations: usize, include_output: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
   let mut frame_nos = Vec::new();
   let mut frame_types = Vec::new();
   let mut times_by_frame: Vec<Vec<Duration>> = Vec::new();
   let mut frames_per_iter = None;
   let mut decoder = StreamDecoder::new(bytes)?;
+  let mut left_y2r = vec![0u8; EYE_FRAME_BYTES];
+  let mut right_y2r = vec![0u8; EYE_FRAME_BYTES];
 
   for iter in 0..iterations {
     let mut index = 0usize;
-    let mut last = Instant::now();
     decoder.reset()?;
+    let mut last = Instant::now();
     while let Some(decoded) = decoder.next_frame()? {
+      if include_output {
+        decoded
+          .frame
+          .left
+          .write_yuv420p_into(std::hint::black_box(left_y2r.as_mut_slice()))?;
+        decoded.frame.right.write_yuv420p_into(std::hint::black_box(
+          right_y2r.as_mut_slice(),
+        ))?;
+        std::hint::black_box(left_y2r.as_slice());
+        std::hint::black_box(right_y2r.as_slice());
+      }
       let now = Instant::now();
       let elapsed = now.duration_since(last);
       last = now;
@@ -546,9 +600,17 @@ fn run_frame_bench(
 
   summaries.sort_by_key(|summary| std::cmp::Reverse(summary.median));
   let report_count = summaries.len().min(10);
-  eprintln!("bench_frame_iterations={iterations}");
+  if include_output {
+    eprintln!("bench_output_frame_iterations={iterations}");
+  } else {
+    eprintln!("bench_frame_iterations={iterations}");
+  }
   eprintln!("frames_per_iteration={frames}");
-  eprintln!("frame_ms_top_by_median count={report_count}");
+  if include_output {
+    eprintln!("output_frame_ms_top_by_median count={report_count}");
+  } else {
+    eprintln!("frame_ms_top_by_median count={report_count}");
+  }
   for summary in summaries.iter().take(report_count) {
     eprintln!(
       "frame index={} no={} type={} mean={:.3} min={:.3} median={:.3} p95={:.3} max={:.3}",
