@@ -323,7 +323,7 @@ static Result wait_y2r_done(void) {
   return -1;
 }
 
-static void blit_rgb24_to_top_bgr8(const u8 *rgb, gfx3dSide_t side) {
+static void blit_y2r_rgb24_to_top_bgr8(const u8 *rgb, gfx3dSide_t side) {
   u8 *fb = gfxGetFramebuffer(GFX_TOP, side, NULL, NULL);
   if (!fb) {
     return;
@@ -334,9 +334,9 @@ static void blit_rgb24_to_top_bgr8(const u8 *rgb, gfx3dSide_t side) {
     for (int x = 0; x < EYE_W; x++) {
       const u8 *src = src_row + x * 3;
       const u32 dst = (u32)((EYE_H - 1 - y) + x * EYE_H) * 3u;
-      fb[dst] = src[2];
+      fb[dst] = src[0];
       fb[dst + 1] = src[1];
-      fb[dst + 2] = src[0];
+      fb[dst + 2] = src[2];
     }
   }
 }
@@ -384,7 +384,7 @@ static int render_eye_y2r(
     return (int)rc;
   }
   GSPGPU_InvalidateDataCache(rgb, RGB24_FRAME_BYTES);
-  blit_rgb24_to_top_bgr8(rgb, side);
+  blit_y2r_rgb24_to_top_bgr8(rgb, side);
   return 0;
 }
 
