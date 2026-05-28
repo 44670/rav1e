@@ -15,8 +15,9 @@ SOURCES := source generated
 INCLUDES := include generated
 
 ARCH := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
+O3YV_TARGET_US ?= 15000
 CFLAGS := -g -Wall -O3 -mword-relocations -ffunction-sections $(ARCH)
-CFLAGS += $(INCLUDE) -D__3DS__
+CFLAGS += $(INCLUDE) -D__3DS__ -DO3YV_TARGET_US=$(O3YV_TARGET_US)ULL
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS := -g $(ARCH)
 LDFLAGS = -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)

@@ -37,12 +37,18 @@ export PATH="$DEVKITPRO/tools/bin:$DEVKITARM/bin:$PATH"
 From the repository root:
 
 ```sh
-tools/o3yv-old3ds-build-harness.sh tmp/reencode_lazy128_current.o3yv
+tools/o3yv-old3ds-build-harness.sh tmp/reencode_lazy128_current.o3yv 8 15000
 ```
 
 The script writes `old3ds/generated/o3yv_stream.{h,s}` and builds
 `old3ds/build/o3yvbench.3dsx`. The generated header also embeds the expected
 frame count and decoded-output checksum for the selected stream.
+
+To build the harness and package the SD-card run files together:
+
+```sh
+tools/o3yv-old3ds-package-run.sh
+```
 
 ## Run
 
