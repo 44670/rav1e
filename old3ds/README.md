@@ -32,7 +32,8 @@ tools/o3yv-old3ds-build-harness.sh tmp/reencode_lazy128_current.o3yv
 ```
 
 The script writes `old3ds/generated/o3yv_stream.{h,s}` and builds
-`old3ds/build/o3yvbench.3dsx`.
+`old3ds/build/o3yvbench.3dsx`. The generated header also embeds the expected
+frame count and decoded-output checksum for the selected stream.
 
 ## Run
 
@@ -44,6 +45,7 @@ console and writes the same benchmark output to `sdmc:/o3yvbench.log`:
 - min, mean, median, and p95 milliseconds per decoded/output frame
 - worst single-frame milliseconds
 - a `bench_result ...` line for machine checking
+- expected and measured decoded-output checksums
 - error code, if decoding fails
 
 Passing the project performance target requires worst-frame timing below

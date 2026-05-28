@@ -64,7 +64,7 @@ if ! rustc +nightly --print target-list | grep -Fxq "$target"; then
   exit 1
 fi
 
-tools/o3yv-old3ds-prepare-stream.sh "$input"
+tools/o3yv-old3ds-prepare-stream.sh "$input" old3ds/generated 8
 mkdir -p old3ds/build/rust
 
 cargo +nightly build \

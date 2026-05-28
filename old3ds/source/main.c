@@ -7,10 +7,16 @@
 #include "minidecoder_3dsffi.h"
 #include "o3yv_stream.h"
 
-#define ITERATIONS 8
 #define MAX_BENCH_SAMPLES 4096
-#define TARGET_US 15000ULL
 #define LOG_PATH "sdmc:/o3yvbench.log"
+
+#ifndef O3YV_BENCH_ITERATIONS
+#define O3YV_BENCH_ITERATIONS 8
+#endif
+
+#ifndef O3YV_TARGET_US
+#define O3YV_TARGET_US 15000ULL
+#endif
 
 static FILE *g_log_file;
 static u64 g_bench_samples[MAX_BENCH_SAMPLES];
@@ -136,7 +142,7 @@ int main(int argc, char **argv) {
   u8 worst_frame_type = 0;
   O3yvFrameInfo info;
 
-  for (int iter = 0; iter < ITERATIONS; iter++) {
+  for (int iter = 0; iter < O3YV_BENCH_ITERATIONS; iter++) {
     rc = o3yv_decoder_reset(decoder);
     if (rc != 0) {
       bench_log("reset failed: %ld\n", (long)rc);
@@ -209,9 +215,18 @@ int main(int argc, char **argv) {
   const u64 p95_us =
       ticks_to_us(percentile_ticks(g_bench_samples, sample_count, 95));
   const u64 worst_us = ticks_to_us(worst_ticks);
-  const int pass = worst_us <= TARGET_US;
+  int output_ok = 1;
+#ifdef O3YV_EXPECTED_FRAMES_PER_ITERATION
+  output_ok = output_ok
+      && frames_per_iteration == O3YV_EXPECTED_FRAMES_PER_ITERATION;
+#endif
+#ifdef O3YV_EXPECTED_CHECKSUM
+  output_ok = output_ok && output_checksum == O3YV_EXPECTED_CHECKSUM;
+#endif
+  const int timing_ok = worst_us <= O3YV_TARGET_US;
+  const int pass = timing_ok && output_ok;
 
-  bench_log("iterations: %d\n", ITERATIONS);
+  bench_log("iterations: %d\n", O3YV_BENCH_ITERATIONS);
   bench_log("frames: %lu\n", (unsigned long)total_frames);
   bench_log(
       "frames_per_iteration: %lu\n", (unsigned long)frames_per_iteration);
@@ -220,19 +235,40 @@ int main(int argc, char **argv) {
   print_us_as_ms("median_ms_per_frame", median_us);
   print_us_as_ms("p95_ms_per_frame", p95_us);
   print_us_as_ms("worst_frame_ms", worst_us);
-  print_us_as_ms("target_worst_ms", TARGET_US);
+  print_us_as_ms("target_worst_ms", O3YV_TARGET_US);
   bench_log("worst_iter: %lu\n", (unsigned long)worst_iter);
   bench_log("worst_frame_no: %lu\n", (unsigned long)worst_frame_no);
   bench_log("worst_frame_type: %u\n", (unsigned)worst_frame_type);
   bench_log(
       "output_checksum: %016llx\n", (unsigned long long)output_checksum);
+#ifdef O3YV_EXPECTED_CHECKSUM
+  bench_log("expected_checksum: %016llx\n",
+      (unsigned long long)O3YV_EXPECTED_CHECKSUM);
+#else
+  bench_log("expected_checksum: unavailable\n");
+#endif
+#ifdef O3YV_EXPECTED_FRAMES_PER_ITERATION
+  bench_log("expected_frames_per_iteration: %u\n",
+      (unsigned)O3YV_EXPECTED_FRAMES_PER_ITERATION);
+#else
+  bench_log("expected_frames_per_iteration: unavailable\n");
+#endif
+  bench_log("timing_status: %s\n", timing_ok ? "pass" : "fail");
+  bench_log("output_status: %s\n", output_ok ? "pass" : "fail");
   bench_log("bench_result status=%s iterations=%d frames=%lu "
             "frames_per_iteration=%lu min_us=%llu mean_us=%llu "
             "median_us=%llu p95_us=%llu worst_us=%llu target_us=%llu "
             "worst_iter=%lu worst_frame_no=%lu worst_frame_type=%u "
-            "checksum=%016llx\n",
+            "checksum=%016llx "
+#ifdef O3YV_EXPECTED_CHECKSUM
+            "expected_checksum=%016llx "
+#endif
+#ifdef O3YV_EXPECTED_FRAMES_PER_ITERATION
+            "expected_frames_per_iteration=%u "
+#endif
+            "timing_status=%s output_status=%s\n",
       pass ? "pass" : "fail",
-      ITERATIONS,
+      O3YV_BENCH_ITERATIONS,
       (unsigned long)total_frames,
       (unsigned long)frames_per_iteration,
       (unsigned long long)min_us,
@@ -240,11 +276,19 @@ int main(int argc, char **argv) {
       (unsigned long long)median_us,
       (unsigned long long)p95_us,
       (unsigned long long)worst_us,
-      (unsigned long long)TARGET_US,
+      (unsigned long long)O3YV_TARGET_US,
       (unsigned long)worst_iter,
       (unsigned long)worst_frame_no,
       (unsigned)worst_frame_type,
-      (unsigned long long)output_checksum);
+      (unsigned long long)output_checksum,
+#ifdef O3YV_EXPECTED_CHECKSUM
+      (unsigned long long)O3YV_EXPECTED_CHECKSUM,
+#endif
+#ifdef O3YV_EXPECTED_FRAMES_PER_ITERATION
+      (unsigned)O3YV_EXPECTED_FRAMES_PER_ITERATION,
+#endif
+      timing_ok ? "pass" : "fail",
+      output_ok ? "pass" : "fail");
   bench_log("%s\n", pass ? "PASS" : "FAIL");
 
 wait_exit:

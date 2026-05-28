@@ -81,6 +81,9 @@ extern const uint8_t O3YV_STREAM[];
 extern const uint8_t O3YV_STREAM_END[];
 
 #define O3YV_STREAM_LEN ((size_t)(O3YV_STREAM_END - O3YV_STREAM))
+#define O3YV_BENCH_ITERATIONS 8
+#define O3YV_EXPECTED_FRAMES_PER_ITERATION 100u
+#define O3YV_EXPECTED_CHECKSUM 0x2bf2aba9994f6b15ULL
 HEADER
 
 "$cc" \
