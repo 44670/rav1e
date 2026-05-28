@@ -32,6 +32,22 @@ export DEVKITARM="$DEVKITPRO/devkitARM"
 export PATH="$DEVKITPRO/tools/bin:$DEVKITARM/bin:$PATH"
 ```
 
+## Candidate Build
+
+The current emulator-tested playback candidate uses a shorter raw-frame gap
+(`--keyint 16`) to keep the direct-plane Y2R playback path under the 15 ms
+decode target on the heaviest frames:
+
+```sh
+tools/o3yv-old3ds-build-playable-candidate.sh \
+  /path/to/800x240-sbs-yuv420.yuv \
+  tmp/reencode_old3ds_directpass.o3yv \
+  tmp/o3yv-old3ds-playable
+```
+
+Then run the Azahar repeat and visual checks from `MANIFEST.env` before copying
+the bundle to hardware.
+
 ## Build
 
 From the repository root:
@@ -66,6 +82,7 @@ console and writes the same benchmark output to `sdmc:/o3yvbench.log`:
 - worst single-frame milliseconds
 - top frames by worst observed decode/output time
 - a `bench_result ...` line for machine checking
+- a `direct_bench_result ...` line for the direct YUV plane path used by Y2R
 - expected and measured decoded-output checksums
 - a `playback_result ...` line for the first rendered playback pass
 - error code, if decoding fails
@@ -74,8 +91,9 @@ After the benchmark, the top screen plays the embedded stereo stream at 24 fps
 using the 3DS Y2R hardware converter, with a slow software BGR8 renderer only
 as a fallback. Press START to exit.
 
-Passing the project performance target requires worst-frame timing below
-`15 ms` for the representative 800x240 SBS stream on Old3DS hardware.
+The strict copy-output budget uses `bench_result worst_us <= 15 ms`. The
+direct-plane playback budget uses `direct_bench_result worst_us <= 15 ms` plus
+`playback_result late_frames=0`; this is the path used by Y2R playback.
 
 After the run, copy `sdmc:/o3yvbench.log` back to the host and check it with:
 

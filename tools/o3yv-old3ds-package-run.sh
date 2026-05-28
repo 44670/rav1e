@@ -169,9 +169,13 @@ For one bundle-level status after Azahar or hardware logs are present:
 
   $bundle_status_command
 
-Passing target:
+Strict copy-output target:
 
-  worst_us <= $target_us
+  bench_result worst_us <= $target_us
+
+Direct-plane playback target:
+
+  direct_bench_result worst_us <= $target_us
   playback worst_work_us <= 41666 and late_frames == 0
 EOF
 
