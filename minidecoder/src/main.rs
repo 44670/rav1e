@@ -684,6 +684,13 @@ struct StreamStats {
   copy16_luma_inbounds_mb: usize,
   copy16_chroma_zero_mb: usize,
   copy_vbs_mb: usize,
+  copy_vbs_16x8_mb: usize,
+  copy_vbs_8x16_mb: usize,
+  copy_vbs_8x8_mb: usize,
+  copy_vbs_all_zero_mb: usize,
+  copy_vbs_luma_parts: usize,
+  copy_vbs_luma_inbounds_parts: usize,
+  copy_vbs_chroma_zero_mb: usize,
   lazy_base_copy_mb: usize,
   raw_mb: usize,
   residual_mb: usize,
@@ -816,6 +823,17 @@ fn print_stream_stats(
     stats.copy16_luma_inbounds_mb,
     stats.copy16_mb.saturating_sub(stats.copy16_luma_inbounds_mb),
     stats.copy16_chroma_zero_mb
+  );
+  eprintln!(
+    "stats copy_vbs_motion split16x8={} split8x16={} split8x8={} all_zero={} luma_parts={} luma_inbounds_parts={} luma_clamped_parts={} chroma_zero={}",
+    stats.copy_vbs_16x8_mb,
+    stats.copy_vbs_8x16_mb,
+    stats.copy_vbs_8x8_mb,
+    stats.copy_vbs_all_zero_mb,
+    stats.copy_vbs_luma_parts,
+    stats.copy_vbs_luma_inbounds_parts,
+    stats.copy_vbs_luma_parts.saturating_sub(stats.copy_vbs_luma_inbounds_parts),
+    stats.copy_vbs_chroma_zero_mb
   );
   eprintln!(
     "stats blocks dc_only={} full_idct={} raw_4x4={}",
@@ -1318,26 +1336,89 @@ fn collect_mb_stats(
       record_copy16_mv_stats(mb_index, mv_x, mv_y, stats);
       collect_residual_stats(residual, stats)
     }
-    minidecoder::MODE_COPY16X8 | minidecoder::MODE_COPY8X16 => {
+    minidecoder::MODE_COPY16X8 => {
       stats.copy_vbs_mb += 1;
-      mode_stream.skip(4)?;
+      stats.copy_vbs_16x8_mb += 1;
+      let mvs = [read_stats_mv(mode_stream)?, read_stats_mv(mode_stream)?];
+      record_vbs_mv_stats(
+        mb_index,
+        minidecoder::VbsShape::Split16x8,
+        &mvs,
+        stats,
+      );
       Ok(())
     }
-    minidecoder::MODE_COPY16X8_RES | minidecoder::MODE_COPY8X16_RES => {
+    minidecoder::MODE_COPY16X8_RES => {
       stats.copy_vbs_mb += 1;
       stats.residual_mb += 1;
-      mode_stream.skip(4)?;
+      stats.copy_vbs_16x8_mb += 1;
+      let mvs = [read_stats_mv(mode_stream)?, read_stats_mv(mode_stream)?];
+      record_vbs_mv_stats(
+        mb_index,
+        minidecoder::VbsShape::Split16x8,
+        &mvs,
+        stats,
+      );
+      collect_residual_stats(residual, stats)
+    }
+    minidecoder::MODE_COPY8X16 => {
+      stats.copy_vbs_mb += 1;
+      stats.copy_vbs_8x16_mb += 1;
+      let mvs = [read_stats_mv(mode_stream)?, read_stats_mv(mode_stream)?];
+      record_vbs_mv_stats(
+        mb_index,
+        minidecoder::VbsShape::Split8x16,
+        &mvs,
+        stats,
+      );
+      Ok(())
+    }
+    minidecoder::MODE_COPY8X16_RES => {
+      stats.copy_vbs_mb += 1;
+      stats.residual_mb += 1;
+      stats.copy_vbs_8x16_mb += 1;
+      let mvs = [read_stats_mv(mode_stream)?, read_stats_mv(mode_stream)?];
+      record_vbs_mv_stats(
+        mb_index,
+        minidecoder::VbsShape::Split8x16,
+        &mvs,
+        stats,
+      );
       collect_residual_stats(residual, stats)
     }
     minidecoder::MODE_COPY8X8 => {
       stats.copy_vbs_mb += 1;
-      mode_stream.skip(8)?;
+      stats.copy_vbs_8x8_mb += 1;
+      let mvs = [
+        read_stats_mv(mode_stream)?,
+        read_stats_mv(mode_stream)?,
+        read_stats_mv(mode_stream)?,
+        read_stats_mv(mode_stream)?,
+      ];
+      record_vbs_mv_stats(
+        mb_index,
+        minidecoder::VbsShape::Split8x8,
+        &mvs,
+        stats,
+      );
       Ok(())
     }
     minidecoder::MODE_COPY8X8_RES => {
       stats.copy_vbs_mb += 1;
       stats.residual_mb += 1;
-      mode_stream.skip(8)?;
+      stats.copy_vbs_8x8_mb += 1;
+      let mvs = [
+        read_stats_mv(mode_stream)?,
+        read_stats_mv(mode_stream)?,
+        read_stats_mv(mode_stream)?,
+        read_stats_mv(mode_stream)?,
+      ];
+      record_vbs_mv_stats(
+        mb_index,
+        minidecoder::VbsShape::Split8x8,
+        &mvs,
+        stats,
+      );
       collect_residual_stats(residual, stats)
     }
     minidecoder::MODE_RAW_MB => {
@@ -1376,6 +1457,83 @@ fn record_copy16_mv_stats(
 
   if ((mv_x as i32) >> 1) == 0 && ((mv_y as i32) >> 1) == 0 {
     stats.copy16_chroma_zero_mb += 1;
+  }
+}
+
+#[cfg(feature = "stats")]
+fn read_stats_mv(
+  mode_stream: &mut StatsReader<'_>,
+) -> Result<minidecoder::Mv, Box<dyn std::error::Error>> {
+  Ok(minidecoder::Mv { x: mode_stream.i8()?, y: mode_stream.i8()? })
+}
+
+#[cfg(feature = "stats")]
+fn record_vbs_mv_stats(
+  mb_index: usize, shape: minidecoder::VbsShape, mvs: &[minidecoder::Mv],
+  stats: &mut StreamStats,
+) {
+  if mvs.iter().all(|mv| *mv == minidecoder::Mv::ZERO) {
+    stats.copy_vbs_all_zero_mb += 1;
+  }
+
+  let mb_x = mb_index % minidecoder::MB_W;
+  let mb_y = mb_index / minidecoder::MB_W;
+  let base_x = mb_x * 16;
+  let base_y = mb_y * 16;
+
+  match shape {
+    minidecoder::VbsShape::Split16x8 => {
+      record_vbs_part_bounds(base_x, base_y, 16, 8, mvs[0], stats);
+      record_vbs_part_bounds(base_x, base_y + 8, 16, 8, mvs[1], stats);
+    }
+    minidecoder::VbsShape::Split8x16 => {
+      record_vbs_part_bounds(base_x, base_y, 8, 16, mvs[0], stats);
+      record_vbs_part_bounds(base_x + 8, base_y, 8, 16, mvs[1], stats);
+    }
+    minidecoder::VbsShape::Split8x8 => {
+      record_vbs_part_bounds(base_x, base_y, 8, 8, mvs[0], stats);
+      record_vbs_part_bounds(base_x + 8, base_y, 8, 8, mvs[1], stats);
+      record_vbs_part_bounds(base_x, base_y + 8, 8, 8, mvs[2], stats);
+      record_vbs_part_bounds(base_x + 8, base_y + 8, 8, 8, mvs[3], stats);
+    }
+  }
+
+  let mut sum_x = 0i32;
+  let mut sum_y = 0i32;
+  for mv in mvs {
+    sum_x += mv.x as i32;
+    sum_y += mv.y as i32;
+  }
+  let avg_x = round_div_i32_stats(sum_x, mvs.len() as i32);
+  let avg_y = round_div_i32_stats(sum_y, mvs.len() as i32);
+  if (avg_x >> 1) == 0 && (avg_y >> 1) == 0 {
+    stats.copy_vbs_chroma_zero_mb += 1;
+  }
+}
+
+#[cfg(feature = "stats")]
+fn record_vbs_part_bounds(
+  dst_x: usize, dst_y: usize, bw: usize, bh: usize, mv: minidecoder::Mv,
+  stats: &mut StreamStats,
+) {
+  stats.copy_vbs_luma_parts += 1;
+  let src_x = dst_x as i32 + mv.x as i32;
+  let src_y = dst_y as i32 + mv.y as i32;
+  if src_x >= 0
+    && src_y >= 0
+    && src_x as usize + bw <= minidecoder::EYE_W
+    && src_y as usize + bh <= minidecoder::EYE_H
+  {
+    stats.copy_vbs_luma_inbounds_parts += 1;
+  }
+}
+
+#[cfg(feature = "stats")]
+fn round_div_i32_stats(value: i32, divisor: i32) -> i32 {
+  if value >= 0 {
+    (value + divisor / 2) / divisor
+  } else {
+    -((-value + divisor / 2) / divisor)
   }
 }
 
