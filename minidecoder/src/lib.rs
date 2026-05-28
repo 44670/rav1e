@@ -1809,6 +1809,22 @@ fn copy_at_4(dst: &mut [u8], dst_off: usize, src: &[u8], src_off: usize) {
 }
 
 #[inline(always)]
+fn copy_at_8_by_4(dst: &mut [u8], dst_off: usize, src: &[u8], src_off: usize) {
+  copy_at_4(dst, dst_off, src, src_off);
+  copy_at_4(dst, dst_off + 4, src, src_off + 4);
+}
+
+#[inline(always)]
+fn copy_at_16_by_4(
+  dst: &mut [u8], dst_off: usize, src: &[u8], src_off: usize,
+) {
+  copy_at_4(dst, dst_off, src, src_off);
+  copy_at_4(dst, dst_off + 4, src, src_off + 4);
+  copy_at_4(dst, dst_off + 8, src, src_off + 8);
+  copy_at_4(dst, dst_off + 12, src, src_off + 12);
+}
+
+#[inline(always)]
 fn copy_at_8(dst: &mut [u8], dst_off: usize, src: &[u8], src_off: usize) {
   debug_assert!(dst_off + 8 <= dst.len());
   debug_assert!(src_off + 8 <= src.len());
@@ -2045,17 +2061,17 @@ fn write_raw_mb(current: &mut EyeFrame, mb_index: usize, bytes: &[u8]) {
   let mut off = 0;
   for row in 0..16 {
     let dst = (mb_y * 16 + row) * EYE_W + mb_x * 16;
-    copy_at::<16>(&mut current.y, dst, bytes, off);
+    copy_at_16_by_4(&mut current.y, dst, bytes, off);
     off += 16;
   }
   for row in 0..8 {
     let dst = (mb_y * 8 + row) * CHROMA_W + mb_x * 8;
-    copy_at::<8>(&mut current.cb, dst, bytes, off);
+    copy_at_8_by_4(&mut current.cb, dst, bytes, off);
     off += 8;
   }
   for row in 0..8 {
     let dst = (mb_y * 8 + row) * CHROMA_W + mb_x * 8;
-    copy_at::<8>(&mut current.cr, dst, bytes, off);
+    copy_at_8_by_4(&mut current.cr, dst, bytes, off);
     off += 8;
   }
 }
