@@ -18,7 +18,7 @@
 #define CHROMA_H 120
 #define PLAYBACK_TARGET_FPS 24ULL
 #define PLAYBACK_TARGET_US (1000000ULL / PLAYBACK_TARGET_FPS)
-#define RGB565_FRAME_BYTES (EYE_W * EYE_H * 2)
+#define RGB24_FRAME_BYTES (EYE_W * EYE_H * 3)
 #define Y2R_TIMEOUT_NS 1000000000LL
 
 #ifndef O3YV_BENCH_ITERATIONS
@@ -45,8 +45,8 @@ static u8 g_frame_ranked[MAX_BENCH_FRAMES];
 static int g_y2r_initialized;
 static int g_y2r_available;
 static int g_y2r_warned;
-static u8 g_y2r_left_rgb565[RGB565_FRAME_BYTES] __attribute__((aligned(16)));
-static u8 g_y2r_right_rgb565[RGB565_FRAME_BYTES] __attribute__((aligned(16)));
+static u8 g_y2r_left_rgb[RGB24_FRAME_BYTES] __attribute__((aligned(16)));
+static u8 g_y2r_right_rgb[RGB24_FRAME_BYTES] __attribute__((aligned(16)));
 
 static void bench_log(const char *fmt, ...) {
   char buffer[512];
@@ -215,7 +215,7 @@ static u8 clip_i32_to_u8(int value) {
   return (u8)value;
 }
 
-static void put_yuv_pixel_rgb565(
+static void put_yuv_pixel_bgr8(
     u8 *fb, int x, int y, u8 y_sample, int cb, int cr) {
   int yy = (int)y_sample - 16;
   if (yy < 0) {
@@ -225,14 +225,13 @@ static void put_yuv_pixel_rgb565(
   const int r = (19077 * yy + 29372 * cr + 8192) >> 14;
   const int g = (19077 * yy - 3494 * cb - 8739 * cr + 8192) >> 14;
   const int b = (19077 * yy + 34610 * cb + 8192) >> 14;
-  const u32 pixel = RGB8_to_565(
-      clip_i32_to_u8(r), clip_i32_to_u8(g), clip_i32_to_u8(b));
-  const u32 dst = (u32)((EYE_H - 1 - y) + x * EYE_H) * 2u;
-  fb[dst] = (u8)(pixel & 0xffu);
-  fb[dst + 1] = (u8)(pixel >> 8);
+  const u32 dst = (u32)((EYE_H - 1 - y) + x * EYE_H) * 3u;
+  fb[dst] = clip_i32_to_u8(b);
+  fb[dst + 1] = clip_i32_to_u8(g);
+  fb[dst + 2] = clip_i32_to_u8(r);
 }
 
-static void render_eye_rgb565(const O3yvEyePlanes *eye, gfx3dSide_t side) {
+static void render_eye_bgr8(const O3yvEyePlanes *eye, gfx3dSide_t side) {
   u8 *fb = gfxGetFramebuffer(GFX_TOP, side, NULL, NULL);
   if (!fb) {
     return;
@@ -253,10 +252,10 @@ static void render_eye_rgb565(const O3yvEyePlanes *eye, gfx3dSide_t side) {
       const int cx = x / 2;
       const int cb = (int)cb_row[cx] - 128;
       const int cr = (int)cr_row[cx] - 128;
-      put_yuv_pixel_rgb565(fb, x, y, y_row0[x], cb, cr);
-      put_yuv_pixel_rgb565(fb, x + 1, y, y_row0[x + 1], cb, cr);
-      put_yuv_pixel_rgb565(fb, x, y_next, y_row1[x], cb, cr);
-      put_yuv_pixel_rgb565(fb, x + 1, y_next, y_row1[x + 1], cb, cr);
+      put_yuv_pixel_bgr8(fb, x, y, y_row0[x], cb, cr);
+      put_yuv_pixel_bgr8(fb, x + 1, y, y_row0[x + 1], cb, cr);
+      put_yuv_pixel_bgr8(fb, x, y_next, y_row1[x], cb, cr);
+      put_yuv_pixel_bgr8(fb, x + 1, y_next, y_row1[x + 1], cb, cr);
     }
   }
 }
@@ -274,7 +273,7 @@ static int init_y2r_playback(void) {
 
   const Y2RU_ConversionParams params = {
       .input_format = INPUT_YUV420_INDIV_8,
-      .output_format = OUTPUT_RGB_16_565,
+      .output_format = OUTPUT_RGB_24,
       .rotation = ROTATION_NONE,
       .block_alignment = BLOCK_LINE,
       .input_line_width = EYE_W,
@@ -324,25 +323,28 @@ static Result wait_y2r_done(void) {
   return -1;
 }
 
-static void blit_y2r_rgb565_to_top(const u8 *rgb565, gfx3dSide_t side) {
+static void blit_y2r_rgb24_to_top_bgr8(const u8 *rgb, gfx3dSide_t side) {
   u8 *fb = gfxGetFramebuffer(GFX_TOP, side, NULL, NULL);
   if (!fb) {
     return;
   }
 
   for (int y = 0; y < EYE_H; y++) {
-    const u8 *src_row = rgb565 + y * EYE_W * 2;
+    const u8 *src_row = rgb + y * EYE_W * 3;
     for (int x = 0; x < EYE_W; x++) {
-      const u8 *src = src_row + x * 2;
-      const u32 dst = (u32)((EYE_H - 1 - y) + x * EYE_H) * 2u;
+      const u8 *src = src_row + x * 3;
+      const u32 dst = (u32)((EYE_H - 1 - y) + x * EYE_H) * 3u;
+      // On hardware/Azahar, Y2R's RGB24 byte stream is already in the
+      // default top framebuffer byte order used by libctru.
       fb[dst] = src[0];
       fb[dst + 1] = src[1];
+      fb[dst + 2] = src[2];
     }
   }
 }
 
 static int render_eye_y2r(
-    const O3yvEyePlanes *eye, gfx3dSide_t side, u8 *rgb565) {
+    const O3yvEyePlanes *eye, gfx3dSide_t side, u8 *rgb) {
   if (!eye->y || !eye->cb || !eye->cr
       || eye->y_len != EYE_W * EYE_H
       || eye->cb_len != CHROMA_W * CHROMA_H
@@ -353,7 +355,7 @@ static int render_eye_y2r(
   GSPGPU_FlushDataCache((void *)eye->y, (u32)eye->y_len);
   GSPGPU_FlushDataCache((void *)eye->cb, (u32)eye->cb_len);
   GSPGPU_FlushDataCache((void *)eye->cr, (u32)eye->cr_len);
-  GSPGPU_FlushDataCache(rgb565, RGB565_FRAME_BYTES);
+  GSPGPU_FlushDataCache(rgb, RGB24_FRAME_BYTES);
 
   Result rc = Y2RU_SetSendingY(
       eye->y, EYE_W * EYE_H, EYE_W * 8, 0);
@@ -371,7 +373,7 @@ static int render_eye_y2r(
     return (int)rc;
   }
   rc = Y2RU_SetReceiving(
-      rgb565, RGB565_FRAME_BYTES, EYE_W * 2 * 8, 0);
+      rgb, RGB24_FRAME_BYTES, EYE_W * 3 * 8, 0);
   if (!y2r_result_ok(rc)) {
     return (int)rc;
   }
@@ -383,22 +385,22 @@ static int render_eye_y2r(
   if (!y2r_result_ok(rc)) {
     return (int)rc;
   }
-  GSPGPU_InvalidateDataCache(rgb565, RGB565_FRAME_BYTES);
-  blit_y2r_rgb565_to_top(rgb565, side);
+  GSPGPU_InvalidateDataCache(rgb, RGB24_FRAME_BYTES);
+  blit_y2r_rgb24_to_top_bgr8(rgb, side);
   return 0;
 }
 
 static const char *playback_renderer_name(void) {
-  return g_y2r_available ? "y2r" : "software_rgb565";
+  return g_y2r_available ? "y2r" : "software_bgr8";
 }
 
 static void render_frame_planes(
     const O3yvEyePlanes *left, const O3yvEyePlanes *right) {
   if (g_y2r_available) {
-    const int left_rc = render_eye_y2r(left, GFX_LEFT, g_y2r_left_rgb565);
+    const int left_rc = render_eye_y2r(left, GFX_LEFT, g_y2r_left_rgb);
     const int right_rc =
         left_rc == 0
-            ? render_eye_y2r(right, GFX_RIGHT, g_y2r_right_rgb565)
+            ? render_eye_y2r(right, GFX_RIGHT, g_y2r_right_rgb)
             : 0;
     if (left_rc == 0 && right_rc == 0) {
       gfxFlushBuffers();
@@ -416,8 +418,8 @@ static void render_frame_planes(
     g_y2r_available = 0;
   }
 
-  render_eye_rgb565(left, GFX_LEFT);
-  render_eye_rgb565(right, GFX_RIGHT);
+  render_eye_bgr8(left, GFX_LEFT);
+  render_eye_bgr8(right, GFX_RIGHT);
   gfxFlushBuffers();
   gfxSwapBuffers();
 }
@@ -749,7 +751,7 @@ int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
 
-  gfxInit(GSP_RGB565_OES, GSP_BGR8_OES, false);
+  gfxInitDefault();
   gfxSet3D(true);
   consoleInit(GFX_BOTTOM, NULL);
   g_log_file = fopen(LOG_PATH, "w");
