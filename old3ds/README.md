@@ -101,8 +101,8 @@ console and writes the same benchmark output to `sdmc:/o3yvbench.log`:
 - error code, if decoding fails
 
 After the benchmark, the top screen plays the embedded stereo stream at 24 fps
-using the 3DS Y2R hardware converter into linear RGB staging buffers, followed
-by a framebuffer swizzle. A slow software BGR8 renderer is only used as a
+using the 3DS Y2R hardware converter into linear RGB565 staging buffers, followed
+by a top-screen RGB565 framebuffer blit. A slow software RGB565 renderer is used as a
 fallback. Press START to exit.
 
 The strict copy-output budget uses `bench_result worst_us <= 15 ms`. The

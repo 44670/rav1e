@@ -62,17 +62,27 @@ typedef struct {
 #define GFX_BOTTOM 1
 #define GFX_LEFT 0
 #define GFX_RIGHT 1
+#define GSP_RGB565_OES 2
+#define GSP_BGR8_OES 1
 #define KEY_START 0x00000008u
 #define SYSCLOCK_ARM11 268123480u
 #define INPUT_YUV420_INDIV_8 1
 #define OUTPUT_RGB_24 1
+#define OUTPUT_RGB_16_565 3
 #define ROTATION_NONE 0
 #define ROTATION_CLOCKWISE_90 1
 #define BLOCK_LINE 0
 #define COEFFICIENT_ITU_R_BT_709_SCALING 3
 #define R_SUCCEEDED(rc) ((rc) >= 0)
+#define RGB8_to_565(r, g, b) \
+  ((((b) >> 3) & 0x1f) | ((((g) >> 2) & 0x3f) << 5) | ((((r) >> 3) & 0x1f) << 11))
 
 static inline void gfxInitDefault(void) {}
+static inline void gfxInit(int topFormat, int bottomFormat, bool vrambuffers) {
+  (void)topFormat;
+  (void)bottomFormat;
+  (void)vrambuffers;
+}
 static inline void gfxSet3D(int enable) {
   (void)enable;
 }
