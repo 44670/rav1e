@@ -42,7 +42,14 @@ Launch `o3yvbench.3dsx` on an Old3DS. The harness prints:
 - iteration count
 - mean milliseconds per decoded/output frame
 - worst single-frame milliseconds
+- a `bench_result ...` line for machine checking
 - error code, if decoding fails
 
 Passing the project performance target requires worst-frame timing below
 `15 ms` for the representative 800x240 SBS stream on Old3DS hardware.
+
+Captured logs can be checked on the host with:
+
+```sh
+tools/o3yv-old3ds-check-log.sh old3ds-bench.log
+```
