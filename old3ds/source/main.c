@@ -334,10 +334,9 @@ static void blit_y2r_rgb24_to_top_bgr8(const u8 *rgb, gfx3dSide_t side) {
     for (int x = 0; x < EYE_W; x++) {
       const u8 *src = src_row + x * 3;
       const u32 dst = (u32)((EYE_H - 1 - y) + x * EYE_H) * 3u;
-      // Y2R RGB24 already matches the 3DS framebuffer byte order here.
-      fb[dst] = src[0];
+      fb[dst] = src[2];
       fb[dst + 1] = src[1];
-      fb[dst + 2] = src[2];
+      fb[dst + 2] = src[0];
     }
   }
 }
