@@ -9,7 +9,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::fmt;
+use core::{fmt, ptr, slice};
 
 pub const VISIBLE_W: usize = 800;
 pub const VISIBLE_H: usize = 240;
@@ -17,6 +17,8 @@ pub const EYE_W: usize = 400;
 pub const EYE_H: usize = 240;
 pub const CHROMA_W: usize = 200;
 pub const CHROMA_H: usize = 120;
+const EYE_Y_BYTES: usize = EYE_W * EYE_H;
+const EYE_CHROMA_BYTES: usize = CHROMA_W * CHROMA_H;
 pub const MB_W: usize = 25;
 pub const MB_H: usize = 15;
 pub const MB_COUNT: usize = MB_W * MB_H;
@@ -1371,7 +1373,7 @@ fn apply_block(
         let samples = residual.take(16)?;
         for row in 0..4 {
           let dst = (y + row) * stride + x;
-          plane[dst..dst + 4].copy_from_slice(&samples[row * 4..row * 4 + 4]);
+          copy_at::<4>(plane, dst, samples, row * 4);
         }
       }
     }
@@ -1462,9 +1464,9 @@ fn add_idct_row(
 
 pub fn prefill_eye(dst: &mut EyeFrame, src: &EyeFrame, mv: Mv) {
   if mv == Mv::ZERO {
-    dst.y.copy_from_slice(&src.y);
-    dst.cb.copy_from_slice(&src.cb);
-    dst.cr.copy_from_slice(&src.cr);
+    copy_exact::<EYE_Y_BYTES>(&mut dst.y, &src.y);
+    copy_exact::<EYE_CHROMA_BYTES>(&mut dst.cb, &src.cb);
+    copy_exact::<EYE_CHROMA_BYTES>(&mut dst.cr, &src.cr);
     return;
   }
 
@@ -1693,6 +1695,31 @@ fn motion_copy_plane(
   }
 }
 
+#[inline(always)]
+fn copy_exact<const N: usize>(dst: &mut [u8], src: &[u8]) {
+  debug_assert!(dst.len() >= N);
+  debug_assert!(src.len() >= N);
+  // SAFETY: Callers use fixed O3YV frame buffers or already-sized raw blocks.
+  unsafe { ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr(), N) };
+}
+
+#[inline(always)]
+fn copy_at<const N: usize>(
+  dst: &mut [u8], dst_off: usize, src: &[u8], src_off: usize,
+) {
+  debug_assert!(dst_off + N <= dst.len());
+  debug_assert!(src_off + N <= src.len());
+  // SAFETY: The preceding debug assertions document invariants established by
+  // stream validation and fixed frame geometry on all release call paths.
+  unsafe {
+    ptr::copy_nonoverlapping(
+      src.as_ptr().add(src_off),
+      dst.as_mut_ptr().add(dst_off),
+      N,
+    );
+  }
+}
+
 fn copy_shifted_row(dst: &mut [u8], src: &[u8], mv_x: i32) {
   debug_assert_eq!(dst.len(), src.len());
   let w = dst.len();
@@ -1723,12 +1750,12 @@ fn copy_rect(
     if bw == 16 {
       for row in 0..bh {
         let off = (dst_y + row) * w + dst_x;
-        copy_16(&mut dst[off..off + 16], &src[off..off + 16]);
+        copy_at::<16>(dst, off, src, off);
       }
     } else if bw == 8 {
       for row in 0..bh {
         let off = (dst_y + row) * w + dst_x;
-        copy_8(&mut dst[off..off + 8], &src[off..off + 8]);
+        copy_at::<8>(dst, off, src, off);
       }
     } else {
       for row in 0..bh {
@@ -1752,13 +1779,13 @@ fn copy_rect(
       for row in 0..bh {
         let dst_off = (dst_y + row) * w + dst_x;
         let src_off = (src_y + row) * w + src_x;
-        copy_16(&mut dst[dst_off..dst_off + 16], &src[src_off..src_off + 16]);
+        copy_at::<16>(dst, dst_off, src, src_off);
       }
     } else if bw == 8 {
       for row in 0..bh {
         let dst_off = (dst_y + row) * w + dst_x;
         let src_off = (src_y + row) * w + src_x;
-        copy_8(&mut dst[dst_off..dst_off + 8], &src[src_off..src_off + 8]);
+        copy_at::<8>(dst, dst_off, src, src_off);
       }
     } else {
       for row in 0..bh {
@@ -1784,55 +1811,23 @@ fn copy_rect(
 }
 
 #[inline(always)]
-fn copy_8(dst: &mut [u8], src: &[u8]) {
-  dst[0] = src[0];
-  dst[1] = src[1];
-  dst[2] = src[2];
-  dst[3] = src[3];
-  dst[4] = src[4];
-  dst[5] = src[5];
-  dst[6] = src[6];
-  dst[7] = src[7];
-}
-
-#[inline(always)]
-fn copy_16(dst: &mut [u8], src: &[u8]) {
-  dst[0] = src[0];
-  dst[1] = src[1];
-  dst[2] = src[2];
-  dst[3] = src[3];
-  dst[4] = src[4];
-  dst[5] = src[5];
-  dst[6] = src[6];
-  dst[7] = src[7];
-  dst[8] = src[8];
-  dst[9] = src[9];
-  dst[10] = src[10];
-  dst[11] = src[11];
-  dst[12] = src[12];
-  dst[13] = src[13];
-  dst[14] = src[14];
-  dst[15] = src[15];
-}
-
-#[inline(always)]
 fn write_raw_mb(current: &mut EyeFrame, mb_index: usize, bytes: &[u8]) {
   let mb_x = mb_index % MB_W;
   let mb_y = mb_index / MB_W;
   let mut off = 0;
   for row in 0..16 {
     let dst = (mb_y * 16 + row) * EYE_W + mb_x * 16;
-    copy_16(&mut current.y[dst..dst + 16], &bytes[off..off + 16]);
+    copy_at::<16>(&mut current.y, dst, bytes, off);
     off += 16;
   }
   for row in 0..8 {
     let dst = (mb_y * 8 + row) * CHROMA_W + mb_x * 8;
-    copy_8(&mut current.cb[dst..dst + 8], &bytes[off..off + 8]);
+    copy_at::<8>(&mut current.cb, dst, bytes, off);
     off += 8;
   }
   for row in 0..8 {
     let dst = (mb_y * 8 + row) * CHROMA_W + mb_x * 8;
-    copy_8(&mut current.cr[dst..dst + 8], &bytes[off..off + 8]);
+    copy_at::<8>(&mut current.cr, dst, bytes, off);
     off += 8;
   }
 }
@@ -1864,11 +1859,14 @@ fn read_eye_raw_into(dst: &mut EyeFrame, bytes: &[u8]) -> Result<()> {
   if bytes.len() != EYE_FRAME_BYTES {
     return Err(Error::Invalid("bad eye raw size".into()));
   }
-  let y_len = EYE_W * EYE_H;
-  let c_len = CHROMA_W * CHROMA_H;
-  dst.y.copy_from_slice(&bytes[..y_len]);
-  dst.cb.copy_from_slice(&bytes[y_len..y_len + c_len]);
-  dst.cr.copy_from_slice(&bytes[y_len + c_len..]);
+  copy_at::<EYE_Y_BYTES>(&mut dst.y, 0, bytes, 0);
+  copy_at::<EYE_CHROMA_BYTES>(&mut dst.cb, 0, bytes, EYE_Y_BYTES);
+  copy_at::<EYE_CHROMA_BYTES>(
+    &mut dst.cr,
+    0,
+    bytes,
+    EYE_Y_BYTES + EYE_CHROMA_BYTES,
+  );
   Ok(())
 }
 
@@ -1937,7 +1935,8 @@ impl<'a> Reader<'a> {
     }
     let start = self.pos;
     self.pos += n;
-    Ok(&self.bytes[start..start + n])
+    // SAFETY: n <= remaining above proves the returned slice is in-bounds.
+    unsafe { Ok(slice::from_raw_parts(self.bytes.as_ptr().add(start), n)) }
   }
 
   #[inline(always)]
@@ -1950,7 +1949,8 @@ impl<'a> Reader<'a> {
     if self.pos >= self.bytes.len() {
       return Err(Error::Eof);
     }
-    let value = self.bytes[self.pos];
+    // SAFETY: The EOF check proves pos is in-bounds.
+    let value = unsafe { *self.bytes.as_ptr().add(self.pos) };
     self.pos += 1;
     Ok(value)
   }
@@ -1968,7 +1968,9 @@ impl<'a> Reader<'a> {
     }
     let start = self.pos;
     self.pos = end;
-    Ok(u16::from_le_bytes([self.bytes[start], self.bytes[start + 1]]))
+    // SAFETY: end <= bytes.len() proves both byte loads are in-bounds.
+    let ptr = unsafe { self.bytes.as_ptr().add(start) };
+    Ok(u16::from_le_bytes(unsafe { [*ptr, *ptr.add(1)] }))
   }
 
   #[inline(always)]
@@ -1979,7 +1981,9 @@ impl<'a> Reader<'a> {
     }
     let start = self.pos;
     self.pos = end;
-    Ok(i16::from_le_bytes([self.bytes[start], self.bytes[start + 1]]))
+    // SAFETY: end <= bytes.len() proves both byte loads are in-bounds.
+    let ptr = unsafe { self.bytes.as_ptr().add(start) };
+    Ok(i16::from_le_bytes(unsafe { [*ptr, *ptr.add(1)] }))
   }
 
   #[inline(always)]
@@ -1990,12 +1994,11 @@ impl<'a> Reader<'a> {
     }
     let start = self.pos;
     self.pos = end;
-    Ok(u32::from_le_bytes([
-      self.bytes[start],
-      self.bytes[start + 1],
-      self.bytes[start + 2],
-      self.bytes[start + 3],
-    ]))
+    // SAFETY: end <= bytes.len() proves all four byte loads are in-bounds.
+    let ptr = unsafe { self.bytes.as_ptr().add(start) };
+    Ok(u32::from_le_bytes(unsafe {
+      [*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)]
+    }))
   }
 
   #[inline(always)]
@@ -2006,16 +2009,20 @@ impl<'a> Reader<'a> {
     }
     let start = self.pos;
     self.pos = end;
-    Ok(u64::from_le_bytes([
-      self.bytes[start],
-      self.bytes[start + 1],
-      self.bytes[start + 2],
-      self.bytes[start + 3],
-      self.bytes[start + 4],
-      self.bytes[start + 5],
-      self.bytes[start + 6],
-      self.bytes[start + 7],
-    ]))
+    // SAFETY: end <= bytes.len() proves all eight byte loads are in-bounds.
+    let ptr = unsafe { self.bytes.as_ptr().add(start) };
+    Ok(u64::from_le_bytes(unsafe {
+      [
+        *ptr,
+        *ptr.add(1),
+        *ptr.add(2),
+        *ptr.add(3),
+        *ptr.add(4),
+        *ptr.add(5),
+        *ptr.add(6),
+        *ptr.add(7),
+      ]
+    }))
   }
 }
 
