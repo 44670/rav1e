@@ -3,13 +3,14 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-usage: tools/o3yv-old3ds-prepare-stream.sh [input.o3yv] [output.h]
+usage: tools/o3yv-old3ds-prepare-stream.sh [input.o3yv] [output-dir]
 
-Generates the C header embedded by the Old3DS timing harness.
+Generates the tiny C header and assembly incbin source used by the Old3DS
+timing harness.
 
 Defaults:
   input.o3yv  tmp/reencode_lazy128_current.o3yv
-  output.h    old3ds/generated/o3yv_stream.h
+  output-dir  old3ds/generated
 USAGE
 }
 
@@ -19,39 +20,39 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 input=${1:-tmp/reencode_lazy128_current.o3yv}
-output=${2:-old3ds/generated/o3yv_stream.h}
+output_dir=${2:-old3ds/generated}
+header=${output_dir}/o3yv_stream.h
+asm=${output_dir}/o3yv_stream.s
 
 if [[ ! -f "$input" ]]; then
   echo "missing input stream: $input" >&2
   exit 1
 fi
 
-mkdir -p "$(dirname "$output")"
-{
-  cat <<'HEADER'
+mkdir -p "$output_dir"
+input_abs=$(realpath "$input")
+
+cat >"$header" <<'HEADER'
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
-static const uint8_t O3YV_STREAM[] = {
+extern const uint8_t O3YV_STREAM[];
+extern const uint8_t O3YV_STREAM_END[];
+
+#define O3YV_STREAM_LEN ((size_t)(O3YV_STREAM_END - O3YV_STREAM))
 HEADER
-  od -An -v -tx1 "$input" | awk '
-    {
-      printf "  "
-      for (i = 1; i <= NF; i++) {
-        printf "0x%s,", $i
-        if (i < NF) {
-          printf " "
-        }
-      }
-      printf "\n"
-    }
-  '
-  cat <<'FOOTER'
-};
 
-static const uint32_t O3YV_STREAM_LEN = sizeof(O3YV_STREAM);
-FOOTER
-} >"$output"
+cat >"$asm" <<ASM
+  .section .rodata.o3yv_stream, "a", %progbits
+  .global O3YV_STREAM
+  .global O3YV_STREAM_END
+  .balign 4
+O3YV_STREAM:
+  .incbin "$input_abs"
+O3YV_STREAM_END:
+ASM
 
-echo "wrote $output"
+echo "wrote $header"
+echo "wrote $asm"

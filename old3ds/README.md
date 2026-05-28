@@ -1,9 +1,10 @@
 # O3YV Old3DS Timing Harness
 
 This directory contains the hardware timing path for the Rust O3YV decoder.
-It builds a small `.3dsx` that embeds a representative O3YV stream, calls the
-Rust decoder through a C ABI, copies each decoded frame into two reusable
-YUV420P eye buffers, and reports total and worst-frame decode time on hardware.
+It builds a `.3dsx` that embeds a representative O3YV stream as a binary
+asset, calls the Rust decoder through a C ABI, copies each decoded frame into
+two reusable YUV420P eye buffers, and reports total and worst-frame decode time
+on hardware.
 
 The local qemu ARM Linux gate is still useful for regressions, but the project
 goal is only proven by running this harness on an actual Old3DS.
@@ -30,7 +31,8 @@ From the repository root:
 tools/o3yv-old3ds-build-harness.sh tmp/reencode_lazy128_current.o3yv
 ```
 
-The output is `old3ds/build/o3yvbench.3dsx`.
+The script writes `old3ds/generated/o3yv_stream.{h,s}` and builds
+`old3ds/build/o3yvbench.3dsx`.
 
 ## Run
 

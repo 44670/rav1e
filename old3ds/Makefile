@@ -11,7 +11,7 @@ include $(DEVKITPRO)/devkitARM/3ds_rules
 
 TARGET := o3yvbench
 BUILD := build
-SOURCES := source
+SOURCES := source generated
 INCLUDES := include generated
 
 ARCH := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
@@ -35,7 +35,8 @@ export VPATH := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
 export DEPSDIR := $(CURDIR)/$(BUILD)
 
 CFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
-OFILES := $(CFILES:.c=.o)
+SFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
+OFILES := $(CFILES:.c=.o) $(SFILES:.s=.o)
 
 export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
   $(foreach dir,$(LIBDIRS),-I$(dir)/include)
@@ -71,6 +72,10 @@ $(OUTPUT).elf: $(OFILES)
 %.o: %.c
 	@echo $(notdir $<)
 	@$(CC) $(CFLAGS) -MMD -MP -MF $(DEPSDIR)/$*.d -c $< -o $@
+
+%.o: %.s
+	@echo $(notdir $<)
+	@$(CC) $(ASFLAGS) -MMD -MP -MF $(DEPSDIR)/$*.d -c $< -o $@
 
 -include $(DEPSDIR)/*.d
 
