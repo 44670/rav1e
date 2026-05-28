@@ -48,6 +48,15 @@ tools/o3yv-old3ds-build-playable-candidate.sh \
 Then run the Azahar repeat and visual checks from `MANIFEST.env` before copying
 the bundle to hardware.
 
+To copy the packaged `.3dsx` to a physical Old3DS SD-card root and later import
+the hardware log back into the bundle:
+
+```sh
+tools/o3yv-old3ds-sd-handoff.sh detect
+tools/o3yv-old3ds-sd-handoff.sh install tmp/o3yv-old3ds-playable /media/$USER/OLD3DS
+tools/o3yv-old3ds-sd-handoff.sh import-log tmp/o3yv-old3ds-playable /media/$USER/OLD3DS
+```
+
 ## Build
 
 From the repository root:
@@ -95,9 +104,19 @@ The strict copy-output budget uses `bench_result worst_us <= 15 ms`. The
 direct-plane playback budget uses `direct_bench_result worst_us <= 15 ms` plus
 `playback_result late_frames=0`; this is the path used by Y2R playback.
 
-After the run, copy `sdmc:/o3yvbench.log` back to the host and check it with:
+After the run, copy `sdmc:/o3yvbench.log` back to the host. For a packaged
+bundle, the handoff helper imports the log to the manifest-defined
+`old3ds-bench.log` path and runs the bundle status verifier:
 
 ```sh
+tools/o3yv-old3ds-sd-handoff.sh import-log \
+  tmp/o3yv-old3ds-playable /media/$USER/OLD3DS
+```
+
+For a standalone log path, check it with:
+
+```sh
+
 tools/o3yv-old3ds-verify-log.sh \
   old3ds-bench.log tmp/reencode_lazy128_current.o3yv 8 15000
 ```

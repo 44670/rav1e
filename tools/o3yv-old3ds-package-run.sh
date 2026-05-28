@@ -106,6 +106,14 @@ printf -v azahar_repeat_command \
 printf -v bundle_status_command \
   'tools/o3yv-old3ds-bundle-status.sh %q' \
   "$out_dir"
+printf -v sd_detect_command \
+  'tools/o3yv-old3ds-sd-handoff.sh detect'
+printf -v sd_install_command \
+  'tools/o3yv-old3ds-sd-handoff.sh install %q /path/to/3ds-sd-root' \
+  "$out_dir"
+printf -v sd_import_log_command \
+  'tools/o3yv-old3ds-sd-handoff.sh import-log %q /path/to/3ds-sd-root' \
+  "$out_dir"
 
 manifest_kv() {
   printf '%s=%q\n' "$1" "$2"
@@ -137,12 +145,20 @@ manifest_kv() {
   manifest_kv azahar_visual_smoke_command "$azahar_visual_command"
   manifest_kv azahar_repeat_command "$azahar_repeat_command"
   manifest_kv bundle_status_command "$bundle_status_command"
+  manifest_kv sd_detect_command "$sd_detect_command"
+  manifest_kv sd_install_command "$sd_install_command"
+  manifest_kv sd_import_log_command "$sd_import_log_command"
 } >"$out_dir/MANIFEST.env"
 
 cat >"$out_dir/RUN_ON_OLD3DS.txt" <<EOF
 Copy o3yvbench.3dsx to the Old3DS SD card and launch it from the Homebrew
 Launcher. The harness first writes decoder benchmark timing, then starts
 24 fps top-screen Y2R playback. Wait for playback to start before exiting.
+
+To copy the app to a physical Old3DS SD-card root from the host:
+
+  $sd_detect_command
+  $sd_install_command
 
 The machine-readable log is written to:
 
@@ -154,6 +170,8 @@ Bundle metadata is in:
 
 After the run, copy that log back beside this bundle as old3ds-bench.log and
 verify timing/output determinism from the repository root with:
+
+  $sd_import_log_command
 
   $verify_bench_command
 
