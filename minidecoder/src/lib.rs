@@ -1293,11 +1293,11 @@ fn apply_mb_residual(
   current: &mut EyeFrame, mb_index: usize, residual: &mut Reader<'_>,
 ) -> Result<()> {
   let mask = residual.u32()?;
-  if (mask & 0xff00_0000) != 0 {
-    return Err(Error::Invalid("coded block mask uses reserved bits".into()));
-  }
   if mask == 0 {
     return Ok(());
+  }
+  if (mask & 0xff00_0000) != 0 {
+    return Err(Error::Invalid("coded block mask uses reserved bits".into()));
   }
 
   let mb_x = mb_index % MB_W;
