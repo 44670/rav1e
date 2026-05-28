@@ -45,6 +45,8 @@ static u8 g_frame_ranked[MAX_BENCH_FRAMES];
 static int g_y2r_initialized;
 static int g_y2r_available;
 static int g_y2r_warned;
+static u8 g_y2r_left_rgb[RGB24_FRAME_BYTES] __attribute__((aligned(16)));
+static u8 g_y2r_right_rgb[RGB24_FRAME_BYTES] __attribute__((aligned(16)));
 
 static void bench_log(const char *fmt, ...) {
   char buffer[512];
@@ -272,7 +274,7 @@ static int init_y2r_playback(void) {
   const Y2RU_ConversionParams params = {
       .input_format = INPUT_YUV420_INDIV_8,
       .output_format = OUTPUT_RGB_24,
-      .rotation = ROTATION_CLOCKWISE_90,
+      .rotation = ROTATION_NONE,
       .block_alignment = BLOCK_LINE,
       .input_line_width = EYE_W,
       .input_lines = EYE_H,
@@ -321,11 +323,26 @@ static Result wait_y2r_done(void) {
   return -1;
 }
 
-static int render_eye_y2r(const O3yvEyePlanes *eye, gfx3dSide_t side) {
+static void blit_rgb24_to_top_bgr8(const u8 *rgb, gfx3dSide_t side) {
   u8 *fb = gfxGetFramebuffer(GFX_TOP, side, NULL, NULL);
   if (!fb) {
-    return -1;
+    return;
   }
+
+  for (int y = 0; y < EYE_H; y++) {
+    const u8 *src_row = rgb + y * EYE_W * 3;
+    for (int x = 0; x < EYE_W; x++) {
+      const u8 *src = src_row + x * 3;
+      const u32 dst = (u32)((EYE_H - 1 - y) + x * EYE_H) * 3u;
+      fb[dst] = src[2];
+      fb[dst + 1] = src[1];
+      fb[dst + 2] = src[0];
+    }
+  }
+}
+
+static int render_eye_y2r(
+    const O3yvEyePlanes *eye, gfx3dSide_t side, u8 *rgb) {
   if (!eye->y || !eye->cb || !eye->cr
       || eye->y_len != EYE_W * EYE_H
       || eye->cb_len != CHROMA_W * CHROMA_H
@@ -336,7 +353,7 @@ static int render_eye_y2r(const O3yvEyePlanes *eye, gfx3dSide_t side) {
   GSPGPU_FlushDataCache((void *)eye->y, (u32)eye->y_len);
   GSPGPU_FlushDataCache((void *)eye->cb, (u32)eye->cb_len);
   GSPGPU_FlushDataCache((void *)eye->cr, (u32)eye->cr_len);
-  GSPGPU_FlushDataCache(fb, RGB24_FRAME_BYTES);
+  GSPGPU_FlushDataCache(rgb, RGB24_FRAME_BYTES);
 
   Result rc = Y2RU_SetSendingY(
       eye->y, EYE_W * EYE_H, EYE_W * 8, 0);
@@ -354,7 +371,7 @@ static int render_eye_y2r(const O3yvEyePlanes *eye, gfx3dSide_t side) {
     return (int)rc;
   }
   rc = Y2RU_SetReceiving(
-      fb, RGB24_FRAME_BYTES, EYE_H * 3 * 8, 0);
+      rgb, RGB24_FRAME_BYTES, EYE_W * 3 * 8, 0);
   if (!y2r_result_ok(rc)) {
     return (int)rc;
   }
@@ -366,6 +383,8 @@ static int render_eye_y2r(const O3yvEyePlanes *eye, gfx3dSide_t side) {
   if (!y2r_result_ok(rc)) {
     return (int)rc;
   }
+  GSPGPU_InvalidateDataCache(rgb, RGB24_FRAME_BYTES);
+  blit_rgb24_to_top_bgr8(rgb, side);
   return 0;
 }
 
@@ -376,9 +395,11 @@ static const char *playback_renderer_name(void) {
 static void render_frame_planes(
     const O3yvEyePlanes *left, const O3yvEyePlanes *right) {
   if (g_y2r_available) {
-    const int left_rc = render_eye_y2r(left, GFX_LEFT);
-    const int right_rc = left_rc == 0 ? render_eye_y2r(right, GFX_RIGHT) : 0;
+    const int left_rc = render_eye_y2r(left, GFX_LEFT, g_y2r_left_rgb);
+    const int right_rc =
+        left_rc == 0 ? render_eye_y2r(right, GFX_RIGHT, g_y2r_right_rgb) : 0;
     if (left_rc == 0 && right_rc == 0) {
+      gfxFlushBuffers();
       gfxSwapBuffers();
       return;
     }

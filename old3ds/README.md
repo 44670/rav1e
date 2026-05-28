@@ -95,18 +95,19 @@ console and writes the same benchmark output to `sdmc:/o3yvbench.log`:
 - worst single-frame milliseconds
 - top frames by worst observed decode/output time
 - a `bench_result ...` line for machine checking
-- a `direct_bench_result ...` line for the direct YUV plane path used by Y2R
+- a `direct_bench_result ...` line for the direct decoded-YUV plane path
 - expected and measured decoded-output checksums
 - a `playback_result ...` line for the first rendered playback pass
 - error code, if decoding fails
 
 After the benchmark, the top screen plays the embedded stereo stream at 24 fps
-using the 3DS Y2R hardware converter, with a slow software BGR8 renderer only
-as a fallback. Press START to exit.
+using the 3DS Y2R hardware converter into linear RGB staging buffers, followed
+by a framebuffer swizzle. A slow software BGR8 renderer is only used as a
+fallback. Press START to exit.
 
 The strict copy-output budget uses `bench_result worst_us <= 15 ms`. The
 direct-plane playback budget uses `direct_bench_result worst_us <= 15 ms` plus
-`playback_result late_frames=0`; this is the path used by Y2R playback.
+`playback_result late_frames=0`.
 
 After the run, copy `sdmc:/o3yvbench.log` back to the host. For a packaged
 bundle, the handoff helper imports the log to the manifest-defined
