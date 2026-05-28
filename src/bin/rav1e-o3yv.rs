@@ -77,6 +77,7 @@ const RATE_WINDOW_BYTES: usize = 2_000_000;
 const QUALITY_RECOVERY_WINDOW_BYTES: usize = RATE_WINDOW_BYTES;
 const P_FRAME_SOFT_TARGET_MIN: usize = 60 * 1024;
 const MAX_RAW_MB_PER_P_FRAME: usize = 96;
+const MAX_DC_ONLY_BLOCKS_PER_P_FRAME: usize = 3_000;
 const MAX_AC_MASK_BLOCKS_PER_P_FRAME: usize = 3_650;
 const MAX_FULL_IDCT_BLOCKS_PER_P_FRAME: usize = 256;
 const MAX_P_DECODE_WORK_UNITS: usize = 1_000_000;
@@ -585,10 +586,11 @@ fn encode_budgeted_p_frame(
     )
   {
     eprintln!(
-      "warning: frame {frame_no} still exceeds budget after quantization: bytes={} rolling_1s_bytes={} raw_mb={} decode_work={} (limits: bytes<={max_p_frame_bytes}, rolling_1s_bytes<={RATE_WINDOW_BYTES}, raw_mb<={MAX_RAW_MB_PER_P_FRAME}, decode_work<={MAX_P_DECODE_WORK_UNITS})",
+      "warning: frame {frame_no} still exceeds budget after quantization: bytes={} rolling_1s_bytes={} raw_mb={} dc_only={} decode_work={} (limits: bytes<={max_p_frame_bytes}, rolling_1s_bytes<={RATE_WINDOW_BYTES}, raw_mb<={MAX_RAW_MB_PER_P_FRAME}, dc_only<={MAX_DC_ONLY_BLOCKS_PER_P_FRAME}, decode_work<={MAX_P_DECODE_WORK_UNITS})",
       best.stats.p_frame_bytes,
       rolling_window_bytes_after(recent_frame_bytes, best.stats.p_frame_bytes),
       best.stats.raw_mb,
+      best.stats.dc_only_blocks,
       best.stats.decode_work_units
     );
   }
@@ -634,6 +636,7 @@ fn p_frame_satisfies_budget(
 ) -> bool {
   stats.p_frame_bytes <= max_p_frame_bytes
     && stats.raw_mb <= MAX_RAW_MB_PER_P_FRAME
+    && stats.dc_only_blocks <= MAX_DC_ONLY_BLOCKS_PER_P_FRAME
     && stats.ac_mask_blocks <= MAX_AC_MASK_BLOCKS_PER_P_FRAME
     && stats.full_idct_blocks <= MAX_FULL_IDCT_BLOCKS_PER_P_FRAME
     && stats.decode_work_units <= MAX_P_DECODE_WORK_UNITS
@@ -2144,6 +2147,20 @@ mod tests {
 
     assert!(p_frame_satisfies_budget(&stats, 64 * 1024));
     stats.full_idct_blocks += 1;
+    assert!(!p_frame_satisfies_budget(&stats, 64 * 1024));
+  }
+
+  #[test]
+  fn p_frame_budget_check_enforces_dc_only_cap() {
+    let mut stats = FrameStats {
+      p_frame_bytes: 1,
+      decode_work_units: 1,
+      dc_only_blocks: MAX_DC_ONLY_BLOCKS_PER_P_FRAME,
+      ..Default::default()
+    };
+
+    assert!(p_frame_satisfies_budget(&stats, 64 * 1024));
+    stats.dc_only_blocks += 1;
     assert!(!p_frame_satisfies_budget(&stats, 64 * 1024));
   }
 
