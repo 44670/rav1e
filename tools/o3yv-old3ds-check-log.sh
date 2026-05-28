@@ -5,7 +5,8 @@ usage() {
   cat <<'USAGE'
 usage: tools/o3yv-old3ds-check-log.sh <old3ds-bench.log> [target_us]
 
-Checks a captured o3yvbench.3dsx console log. The harness must print a
+Checks a captured o3yvbench.3dsx log, normally copied from
+sdmc:/o3yvbench.log after a hardware run. The harness must print a
 machine-readable line like:
 
   bench_result status=pass iterations=8 frames=800 frames_per_iteration=100 ...

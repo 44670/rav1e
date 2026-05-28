@@ -36,7 +36,8 @@ The script writes `old3ds/generated/o3yv_stream.{h,s}` and builds
 
 ## Run
 
-Launch `o3yvbench.3dsx` on an Old3DS. The harness prints:
+Launch `o3yvbench.3dsx` on an Old3DS. The harness prints to the top-screen
+console and writes the same benchmark output to `sdmc:/o3yvbench.log`:
 
 - frame count
 - iteration count
@@ -48,7 +49,7 @@ Launch `o3yvbench.3dsx` on an Old3DS. The harness prints:
 Passing the project performance target requires worst-frame timing below
 `15 ms` for the representative 800x240 SBS stream on Old3DS hardware.
 
-Captured logs can be checked on the host with:
+After the run, copy `sdmc:/o3yvbench.log` back to the host and check it with:
 
 ```sh
 tools/o3yv-old3ds-check-log.sh old3ds-bench.log
