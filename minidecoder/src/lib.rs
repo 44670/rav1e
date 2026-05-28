@@ -452,8 +452,8 @@ impl<'a> StreamDecoder<'a> {
     if !self.state.has_reference {
       return Err(Error::Invalid("no decoded frame available".into()));
     }
-    self.state.reference.left.write_yuv420p_into(left)?;
-    self.state.reference.right.write_yuv420p_into(right)?;
+    write_decoder_eye_yuv420p_into(&self.state.reference.left, left)?;
+    write_decoder_eye_yuv420p_into(&self.state.reference.right, right)?;
     Ok(())
   }
 
@@ -559,6 +559,25 @@ fn decode_next_frame<'state>(
   core::mem::swap(&mut state.reference, &mut state.current);
   state.has_reference = true;
   Ok(Some(DecodedFrameRef { frame_no, frame_type, frame: &state.reference }))
+}
+
+fn write_decoder_eye_yuv420p_into(
+  eye: &EyeFrame, out: &mut [u8],
+) -> Result<()> {
+  if out.len() != EYE_FRAME_BYTES {
+    return Err(Error::Invalid(format!(
+      "expected {EYE_FRAME_BYTES} eye YUV420 bytes, got {}",
+      out.len()
+    )));
+  }
+  debug_assert_eq!(eye.y.len(), EYE_Y_BYTES);
+  debug_assert_eq!(eye.cb.len(), EYE_CHROMA_BYTES);
+  debug_assert_eq!(eye.cr.len(), EYE_CHROMA_BYTES);
+
+  copy_at::<EYE_Y_BYTES>(out, 0, &eye.y, 0);
+  copy_at::<EYE_CHROMA_BYTES>(out, EYE_Y_BYTES, &eye.cb, 0);
+  copy_at::<EYE_CHROMA_BYTES>(out, EYE_Y_BYTES + EYE_CHROMA_BYTES, &eye.cr, 0);
+  Ok(())
 }
 
 fn write_frame_header(
