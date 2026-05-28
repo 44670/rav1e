@@ -57,6 +57,33 @@ static u64 percentile_ticks(const u64 *samples, u32 sample_count, u32 pct) {
   return samples[rank == 0 ? 0 : rank - 1];
 }
 
+static void checksum_update_byte(u64 *state, u8 byte) {
+  *state ^= (u64)byte;
+  *state *= 1099511628211ULL;
+}
+
+static void checksum_update_u32(u64 *state, u32 value) {
+  checksum_update_byte(state, (u8)(value & 0xff));
+  checksum_update_byte(state, (u8)((value >> 8) & 0xff));
+  checksum_update_byte(state, (u8)((value >> 16) & 0xff));
+  checksum_update_byte(state, (u8)((value >> 24) & 0xff));
+}
+
+static void checksum_update_bytes(u64 *state, const u8 *bytes, size_t len) {
+  for (size_t i = 0; i < len; i++) {
+    checksum_update_byte(state, bytes[i]);
+  }
+}
+
+static void checksum_update_frame(
+    u64 *state, u32 frame_no, u8 frame_type, const u8 *left,
+    const u8 *right, size_t eye_bytes) {
+  checksum_update_u32(state, frame_no);
+  checksum_update_byte(state, frame_type);
+  checksum_update_bytes(state, left, eye_bytes);
+  checksum_update_bytes(state, right, eye_bytes);
+}
+
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -103,6 +130,7 @@ int main(int argc, char **argv) {
   u64 total_ticks = 0;
   u64 min_ticks = ~0ULL;
   u64 worst_ticks = 0;
+  u64 output_checksum = 14695981039346656037ULL;
   u32 worst_iter = 0;
   u32 worst_frame_no = 0;
   u8 worst_frame_type = 0;
@@ -135,6 +163,13 @@ int main(int argc, char **argv) {
         goto wait_exit;
       }
       g_bench_samples[sample_count++] = elapsed;
+      checksum_update_frame(
+          &output_checksum,
+          info.frame_no,
+          info.frame_type,
+          left,
+          right,
+          eye_bytes);
       total_frames++;
       iter_frames++;
       total_ticks += elapsed;
@@ -189,10 +224,13 @@ int main(int argc, char **argv) {
   bench_log("worst_iter: %lu\n", (unsigned long)worst_iter);
   bench_log("worst_frame_no: %lu\n", (unsigned long)worst_frame_no);
   bench_log("worst_frame_type: %u\n", (unsigned)worst_frame_type);
+  bench_log(
+      "output_checksum: %016llx\n", (unsigned long long)output_checksum);
   bench_log("bench_result status=%s iterations=%d frames=%lu "
             "frames_per_iteration=%lu min_us=%llu mean_us=%llu "
             "median_us=%llu p95_us=%llu worst_us=%llu target_us=%llu "
-            "worst_iter=%lu worst_frame_no=%lu worst_frame_type=%u\n",
+            "worst_iter=%lu worst_frame_no=%lu worst_frame_type=%u "
+            "checksum=%016llx\n",
       pass ? "pass" : "fail",
       ITERATIONS,
       (unsigned long)total_frames,
@@ -205,7 +243,8 @@ int main(int argc, char **argv) {
       (unsigned long long)TARGET_US,
       (unsigned long)worst_iter,
       (unsigned long)worst_frame_no,
-      (unsigned)worst_frame_type);
+      (unsigned)worst_frame_type,
+      (unsigned long long)output_checksum);
   bench_log("%s\n", pass ? "PASS" : "FAIL");
 
 wait_exit:

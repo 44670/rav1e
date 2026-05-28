@@ -163,6 +163,7 @@ check_file "Old3DS harness C source" "old3ds/source/main.c"
 check_file "Old3DS Rust FFI crate" "old3ds/minidecoder-3dsffi/Cargo.toml"
 check_file "Old3DS build script" "tools/o3yv-old3ds-build-harness.sh"
 check_file "Old3DS bench log checker" "tools/o3yv-old3ds-check-log.sh"
+check_file "Old3DS expected checksum tool" "tools/o3yv-old3ds-expected-checksum.sh"
 check_command cargo
 if command -v cargo >/dev/null 2>&1; then
   check_minidecoder_nostd

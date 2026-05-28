@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-usage: tools/o3yv-old3ds-check-log.sh <old3ds-bench.log> [target_us] [expected_frames_per_iteration]
+usage: tools/o3yv-old3ds-check-log.sh <old3ds-bench.log> [target_us] [expected_frames_per_iteration] [expected_checksum]
 
 Checks a captured o3yvbench.3dsx log, normally copied from
 sdmc:/o3yvbench.log after a hardware run. The harness must print a
@@ -14,6 +14,7 @@ machine-readable line like:
 Defaults:
   target_us                       15000
   expected_frames_per_iteration  unset
+  expected_checksum              unset
 USAGE
 }
 
@@ -25,6 +26,7 @@ fi
 log=${1:?missing Old3DS bench log}
 target_us=${2:-15000}
 expected_frames_per_iteration=${3:-}
+expected_checksum=${4:-}
 
 if [[ ! -f "$log" ]]; then
   echo "missing log: $log" >&2
@@ -63,13 +65,18 @@ p95_us=$(value p95_us)
 worst_us=$(value worst_us)
 reported_target_us=$(value target_us)
 worst_frame_no=$(value worst_frame_no)
+checksum=$(value checksum)
 
 is_uint() {
   [[ "$1" =~ ^[0-9]+$ ]]
 }
 
+is_hex_u64() {
+  [[ "$1" =~ ^[0-9A-Fa-f]{16}$ ]]
+}
+
 for item in status iterations frames frames_per_iteration min_us mean_us \
-  median_us p95_us worst_us reported_target_us worst_frame_no; do
+  median_us p95_us worst_us reported_target_us worst_frame_no checksum; do
   if [[ -z "${!item}" ]]; then
     echo "FAIL missing $item in bench_result" >&2
     exit 1
@@ -85,6 +92,14 @@ done
 if [[ -n "$expected_frames_per_iteration" ]] \
   && ! is_uint "$expected_frames_per_iteration"; then
   echo "FAIL non-numeric expected_frames_per_iteration=$expected_frames_per_iteration" >&2
+  exit 1
+fi
+if ! is_hex_u64 "$checksum"; then
+  echo "FAIL invalid checksum=$checksum" >&2
+  exit 1
+fi
+if [[ -n "$expected_checksum" ]] && ! is_hex_u64 "$expected_checksum"; then
+  echo "FAIL invalid expected_checksum=$expected_checksum" >&2
   exit 1
 fi
 
@@ -133,6 +148,11 @@ if (( mean_us > worst_us )); then
   echo "FAIL mean_us=$mean_us > worst_us=$worst_us" >&2
   exit 1
 fi
+if [[ -n "$expected_checksum" ]] \
+  && [[ "${checksum,,}" != "${expected_checksum,,}" ]]; then
+  echo "FAIL checksum=$checksum expected=$expected_checksum" >&2
+  exit 1
+fi
 
-printf 'PASS Old3DS bench: frames=%s min_us=%s mean_us=%s median_us=%s p95_us=%s worst_us=%s worst_frame_no=%s target_us=%s\n' \
-  "$frames" "$min_us" "$mean_us" "$median_us" "$p95_us" "$worst_us" "$worst_frame_no" "$target_us"
+printf 'PASS Old3DS bench: frames=%s min_us=%s mean_us=%s median_us=%s p95_us=%s worst_us=%s worst_frame_no=%s target_us=%s checksum=%s\n' \
+  "$frames" "$min_us" "$mean_us" "$median_us" "$p95_us" "$worst_us" "$worst_frame_no" "$target_us" "$checksum"
