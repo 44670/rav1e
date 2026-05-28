@@ -50,6 +50,10 @@ To build the harness and package the SD-card run files together:
 tools/o3yv-old3ds-package-run.sh
 ```
 
+The run bundle includes `MANIFEST.env`, a sourceable key/value manifest with
+the `.3dsx` SHA-256, stream checksum, frame count, target budgets, and exact
+verification commands for hardware and Azahar evidence.
+
 ## Run
 
 Launch `o3yvbench.3dsx` on an Old3DS. The harness prints to the bottom-screen

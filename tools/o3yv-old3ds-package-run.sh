@@ -8,6 +8,7 @@ usage: tools/o3yv-old3ds-package-run.sh [input.o3yv] [out_dir] [iterations] [tar
 Builds the Old3DS timing harness and writes a small run bundle containing:
   - o3yvbench.3dsx
   - expected host checksum metadata
+  - MANIFEST.env with exact stream/build/check parameters
   - the exact log-verification command to run after copying sdmc:/o3yvbench.log
 
 Defaults:
@@ -61,8 +62,71 @@ if [[ -z "$frames_per_iteration" ]]; then
   echo "failed to parse expected frames_per_iteration" >&2
   exit 1
 fi
+checksum=$(
+  awk -F= '/^checksum=/ { print $2; exit }' <<<"$expected"
+)
+if [[ -z "$checksum" ]]; then
+  echo "failed to parse expected checksum" >&2
+  exit 1
+fi
 printf '%s\n' "$expected" >"$out_dir/expected.txt"
 sha256sum "$out_dir/o3yvbench.3dsx" >"$out_dir/o3yvbench.3dsx.sha256"
+bench_sha256=$(
+  awk '{ print $1; exit }' "$out_dir/o3yvbench.3dsx.sha256"
+)
+input_bytes=$(wc -c <"$input")
+bench_bytes=$(wc -c <"$out_dir/o3yvbench.3dsx")
+repo_commit=$(
+  git rev-parse --short HEAD 2>/dev/null || printf 'unknown'
+)
+generated_at_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+printf -v verify_bench_command \
+  'tools/o3yv-old3ds-verify-log.sh %q %q %q %q' \
+  "$out_dir/old3ds-bench.log" "$input" "$iterations" "$target_us"
+printf -v verify_playback_command \
+  'tools/o3yv-old3ds-check-playback-log.sh %q %q %q %q %q' \
+  "$out_dir/old3ds-bench.log" "41666" "$frames_per_iteration" "24" "y2r"
+printf -v report_command \
+  'tools/o3yv-old3ds-playability-report.sh %q %q %q %q %q %q' \
+  "$out_dir/old3ds-bench.log" "$input" "$iterations" "$target_us" \
+  "41666" "real_old3ds"
+printf -v azahar_timing_command \
+  'tools/o3yv-azahar-run-bench.sh %q %q %q %q' \
+  "$out_dir/o3yvbench.3dsx" "$out_dir/azahar-playback.log" "120" \
+  "playback_result"
+printf -v azahar_visual_command \
+  'tools/o3yv-azahar-visual-smoke.sh %q %q %q' \
+  "$out_dir/o3yvbench.3dsx" "$out_dir/azahar-visual-smoke" "120"
+
+manifest_kv() {
+  printf '%s=%q\n' "$1" "$2"
+}
+
+{
+  manifest_kv o3yv_bundle_format 1
+  manifest_kv generated_at_utc "$generated_at_utc"
+  manifest_kv repo_commit "$repo_commit"
+  manifest_kv input_stream "$input"
+  manifest_kv input_bytes "$input_bytes"
+  manifest_kv iterations "$iterations"
+  manifest_kv bench_target_us "$target_us"
+  manifest_kv playback_target_us 41666
+  manifest_kv playback_fps 24
+  manifest_kv playback_renderer y2r
+  manifest_kv expected_frames_per_iteration "$frames_per_iteration"
+  manifest_kv expected_checksum "$checksum"
+  manifest_kv o3yvbench_3dsx "$out_dir/o3yvbench.3dsx"
+  manifest_kv o3yvbench_3dsx_bytes "$bench_bytes"
+  manifest_kv o3yvbench_3dsx_sha256 "$bench_sha256"
+  manifest_kv hardware_log_path "sdmc:/o3yvbench.log"
+  manifest_kv hardware_log_copy "$out_dir/old3ds-bench.log"
+  manifest_kv verify_bench_command "$verify_bench_command"
+  manifest_kv verify_playback_command "$verify_playback_command"
+  manifest_kv playability_report_command "$report_command"
+  manifest_kv azahar_timing_command "$azahar_timing_command"
+  manifest_kv azahar_visual_smoke_command "$azahar_visual_command"
+} >"$out_dir/MANIFEST.env"
 
 cat >"$out_dir/RUN_ON_OLD3DS.txt" <<EOF
 Copy o3yvbench.3dsx to the Old3DS SD card and launch it from the Homebrew
@@ -73,18 +137,22 @@ The machine-readable log is written to:
 
   sdmc:/o3yvbench.log
 
+Bundle metadata is in:
+
+  $out_dir/MANIFEST.env
+
 After the run, copy that log back beside this bundle as old3ds-bench.log and
 verify timing/output determinism from the repository root with:
 
-  tools/o3yv-old3ds-verify-log.sh "$out_dir/old3ds-bench.log" "$input" "$iterations" "$target_us"
+  $verify_bench_command
 
 For playback timing, inspect:
 
-  tools/o3yv-old3ds-check-playback-log.sh "$out_dir/old3ds-bench.log" "41666" "$frames_per_iteration" "24" "y2r"
+  $verify_playback_command
 
 For one combined playability report:
 
-  tools/o3yv-old3ds-playability-report.sh "$out_dir/old3ds-bench.log" "$input" "$iterations" "$target_us" "41666" "real_old3ds"
+  $report_command
 
 Passing target:
 
