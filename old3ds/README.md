@@ -122,6 +122,8 @@ tools/o3yv-azahar-repeat-bench.sh \
 tools/o3yv-azahar-visual-smoke.sh \
   tmp/o3yv-old3ds-playable/o3yvbench.3dsx \
   tmp/azahar-visual-smoke 120
+
+tools/o3yv-old3ds-bundle-status.sh tmp/o3yv-old3ds-playable
 ```
 
 Azahar evidence can only support `playability_status=plausible`; final proof

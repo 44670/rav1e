@@ -103,6 +103,9 @@ printf -v azahar_repeat_command \
   'tools/o3yv-azahar-repeat-bench.sh %q %q %q %q %q %q %q %q' \
   "$out_dir/o3yvbench.3dsx" "$out_dir/azahar-repeat-bench" "3" \
   "120" "$input" "$iterations" "$target_us" "41666"
+printf -v bundle_status_command \
+  'tools/o3yv-old3ds-bundle-status.sh %q' \
+  "$out_dir"
 
 manifest_kv() {
   printf '%s=%q\n' "$1" "$2"
@@ -133,6 +136,7 @@ manifest_kv() {
   manifest_kv azahar_timing_command "$azahar_timing_command"
   manifest_kv azahar_visual_smoke_command "$azahar_visual_command"
   manifest_kv azahar_repeat_command "$azahar_repeat_command"
+  manifest_kv bundle_status_command "$bundle_status_command"
 } >"$out_dir/MANIFEST.env"
 
 cat >"$out_dir/RUN_ON_OLD3DS.txt" <<EOF
@@ -160,6 +164,10 @@ For playback timing, inspect:
 For one combined playability report:
 
   $report_command
+
+For one bundle-level status after Azahar or hardware logs are present:
+
+  $bundle_status_command
 
 Passing target:
 
