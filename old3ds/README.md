@@ -52,5 +52,5 @@ Passing the project performance target requires worst-frame timing below
 After the run, copy `sdmc:/o3yvbench.log` back to the host and check it with:
 
 ```sh
-tools/o3yv-old3ds-check-log.sh old3ds-bench.log
+tools/o3yv-old3ds-check-log.sh old3ds-bench.log 15000 100
 ```
