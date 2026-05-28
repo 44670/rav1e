@@ -8,10 +8,12 @@
 #include "o3yv_stream.h"
 
 #define ITERATIONS 8
+#define MAX_BENCH_SAMPLES 4096
 #define TARGET_US 15000ULL
 #define LOG_PATH "sdmc:/o3yvbench.log"
 
 static FILE *g_log_file;
+static u64 g_bench_samples[MAX_BENCH_SAMPLES];
 
 static void bench_log(const char *fmt, ...) {
   char buffer[512];
@@ -36,6 +38,23 @@ static void print_us_as_ms(const char *label, u64 us) {
       label,
       (unsigned long long)(us / 1000ULL),
       (unsigned long long)(us % 1000ULL));
+}
+
+static int compare_u64(const void *a, const void *b) {
+  const u64 av = *(const u64 *)a;
+  const u64 bv = *(const u64 *)b;
+  if (av < bv) {
+    return -1;
+  }
+  if (av > bv) {
+    return 1;
+  }
+  return 0;
+}
+
+static u64 percentile_ticks(const u64 *samples, u32 sample_count, u32 pct) {
+  const u32 rank = ((pct * sample_count) + 99) / 100;
+  return samples[rank == 0 ? 0 : rank - 1];
 }
 
 int main(int argc, char **argv) {
@@ -80,7 +99,9 @@ int main(int argc, char **argv) {
 
   u32 total_frames = 0;
   u32 frames_per_iteration = 0;
+  u32 sample_count = 0;
   u64 total_ticks = 0;
+  u64 min_ticks = ~0ULL;
   u64 worst_ticks = 0;
   u32 worst_iter = 0;
   u32 worst_frame_no = 0;
@@ -109,9 +130,17 @@ int main(int argc, char **argv) {
         goto wait_exit;
       }
 
+      if (sample_count >= MAX_BENCH_SAMPLES) {
+        bench_log("too many bench samples: max=%u\n", MAX_BENCH_SAMPLES);
+        goto wait_exit;
+      }
+      g_bench_samples[sample_count++] = elapsed;
       total_frames++;
       iter_frames++;
       total_ticks += elapsed;
+      if (elapsed < min_ticks) {
+        min_ticks = elapsed;
+      }
       if (elapsed > worst_ticks) {
         worst_ticks = elapsed;
         worst_iter = (u32)iter;
@@ -136,7 +165,14 @@ int main(int argc, char **argv) {
     goto wait_exit;
   }
 
+  qsort(g_bench_samples, sample_count, sizeof(g_bench_samples[0]), compare_u64);
+
   const u64 mean_us = ticks_to_us(total_ticks) / (u64)total_frames;
+  const u64 min_us = ticks_to_us(min_ticks);
+  const u64 median_us =
+      ticks_to_us(percentile_ticks(g_bench_samples, sample_count, 50));
+  const u64 p95_us =
+      ticks_to_us(percentile_ticks(g_bench_samples, sample_count, 95));
   const u64 worst_us = ticks_to_us(worst_ticks);
   const int pass = worst_us <= TARGET_US;
 
@@ -144,21 +180,27 @@ int main(int argc, char **argv) {
   bench_log("frames: %lu\n", (unsigned long)total_frames);
   bench_log(
       "frames_per_iteration: %lu\n", (unsigned long)frames_per_iteration);
+  print_us_as_ms("min_ms_per_frame", min_us);
   print_us_as_ms("mean_ms_per_frame", mean_us);
+  print_us_as_ms("median_ms_per_frame", median_us);
+  print_us_as_ms("p95_ms_per_frame", p95_us);
   print_us_as_ms("worst_frame_ms", worst_us);
   print_us_as_ms("target_worst_ms", TARGET_US);
   bench_log("worst_iter: %lu\n", (unsigned long)worst_iter);
   bench_log("worst_frame_no: %lu\n", (unsigned long)worst_frame_no);
   bench_log("worst_frame_type: %u\n", (unsigned)worst_frame_type);
   bench_log("bench_result status=%s iterations=%d frames=%lu "
-            "frames_per_iteration=%lu mean_us=%llu worst_us=%llu "
-            "target_us=%llu worst_iter=%lu worst_frame_no=%lu "
-            "worst_frame_type=%u\n",
+            "frames_per_iteration=%lu min_us=%llu mean_us=%llu "
+            "median_us=%llu p95_us=%llu worst_us=%llu target_us=%llu "
+            "worst_iter=%lu worst_frame_no=%lu worst_frame_type=%u\n",
       pass ? "pass" : "fail",
       ITERATIONS,
       (unsigned long)total_frames,
       (unsigned long)frames_per_iteration,
+      (unsigned long long)min_us,
       (unsigned long long)mean_us,
+      (unsigned long long)median_us,
+      (unsigned long long)p95_us,
       (unsigned long long)worst_us,
       (unsigned long long)TARGET_US,
       (unsigned long)worst_iter,

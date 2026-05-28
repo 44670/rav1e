@@ -57,6 +57,9 @@ iterations=$(value iterations)
 frames=$(value frames)
 frames_per_iteration=$(value frames_per_iteration)
 mean_us=$(value mean_us)
+min_us=$(value min_us)
+median_us=$(value median_us)
+p95_us=$(value p95_us)
 worst_us=$(value worst_us)
 reported_target_us=$(value target_us)
 worst_frame_no=$(value worst_frame_no)
@@ -65,15 +68,15 @@ is_uint() {
   [[ "$1" =~ ^[0-9]+$ ]]
 }
 
-for item in status iterations frames frames_per_iteration mean_us worst_us \
-  reported_target_us worst_frame_no; do
+for item in status iterations frames frames_per_iteration min_us mean_us \
+  median_us p95_us worst_us reported_target_us worst_frame_no; do
   if [[ -z "${!item}" ]]; then
     echo "FAIL missing $item in bench_result" >&2
     exit 1
   fi
 done
-for item in iterations frames frames_per_iteration mean_us worst_us \
-  reported_target_us worst_frame_no; do
+for item in iterations frames frames_per_iteration min_us mean_us median_us \
+  p95_us worst_us reported_target_us worst_frame_no; do
   if ! is_uint "${!item}"; then
     echo "FAIL non-numeric $item=${!item}" >&2
     exit 1
@@ -110,10 +113,26 @@ if (( worst_us > target_us )); then
   echo "FAIL worst_us=$worst_us > target_us=$target_us" >&2
   exit 1
 fi
+if (( min_us > mean_us )); then
+  echo "FAIL min_us=$min_us > mean_us=$mean_us" >&2
+  exit 1
+fi
+if (( min_us > median_us )); then
+  echo "FAIL min_us=$min_us > median_us=$median_us" >&2
+  exit 1
+fi
+if (( median_us > worst_us )); then
+  echo "FAIL median_us=$median_us > worst_us=$worst_us" >&2
+  exit 1
+fi
+if (( p95_us > worst_us )); then
+  echo "FAIL p95_us=$p95_us > worst_us=$worst_us" >&2
+  exit 1
+fi
 if (( mean_us > worst_us )); then
   echo "FAIL mean_us=$mean_us > worst_us=$worst_us" >&2
   exit 1
 fi
 
-printf 'PASS Old3DS bench: frames=%s mean_us=%s worst_us=%s worst_frame_no=%s target_us=%s\n' \
-  "$frames" "$mean_us" "$worst_us" "$worst_frame_no" "$target_us"
+printf 'PASS Old3DS bench: frames=%s min_us=%s mean_us=%s median_us=%s p95_us=%s worst_us=%s worst_frame_no=%s target_us=%s\n' \
+  "$frames" "$min_us" "$mean_us" "$median_us" "$p95_us" "$worst_us" "$worst_frame_no" "$target_us"
