@@ -8,6 +8,8 @@
 #include "o3yv_stream.h"
 
 #define MAX_BENCH_SAMPLES 4096
+#define MAX_BENCH_FRAMES 512
+#define TOP_FRAME_REPORT_COUNT 10
 #define LOG_PATH "sdmc:/o3yvbench.log"
 
 #ifndef O3YV_BENCH_ITERATIONS
@@ -20,6 +22,13 @@
 
 static FILE *g_log_file;
 static u64 g_bench_samples[MAX_BENCH_SAMPLES];
+static u64 g_frame_total_ticks[MAX_BENCH_FRAMES];
+static u64 g_frame_min_ticks[MAX_BENCH_FRAMES];
+static u64 g_frame_max_ticks[MAX_BENCH_FRAMES];
+static u32 g_frame_sample_count[MAX_BENCH_FRAMES];
+static u32 g_frame_no[MAX_BENCH_FRAMES];
+static u8 g_frame_type[MAX_BENCH_FRAMES];
+static u8 g_frame_ranked[MAX_BENCH_FRAMES];
 
 static void bench_log(const char *fmt, ...) {
   char buffer[512];
@@ -61,6 +70,67 @@ static int compare_u64(const void *a, const void *b) {
 static u64 percentile_ticks(const u64 *samples, u32 sample_count, u32 pct) {
   const u32 rank = ((pct * sample_count) + 99) / 100;
   return samples[rank == 0 ? 0 : rank - 1];
+}
+
+static void update_frame_timing(
+    u32 index, u32 frame_no, u8 frame_type, u64 elapsed) {
+  if (g_frame_sample_count[index] == 0) {
+    g_frame_no[index] = frame_no;
+    g_frame_type[index] = frame_type;
+    g_frame_min_ticks[index] = elapsed;
+    g_frame_max_ticks[index] = elapsed;
+  } else {
+    if (elapsed < g_frame_min_ticks[index]) {
+      g_frame_min_ticks[index] = elapsed;
+    }
+    if (elapsed > g_frame_max_ticks[index]) {
+      g_frame_max_ticks[index] = elapsed;
+    }
+  }
+  g_frame_total_ticks[index] += elapsed;
+  g_frame_sample_count[index]++;
+}
+
+static void print_top_frame_timings(u32 frame_count) {
+  const u32 report_count =
+      frame_count < TOP_FRAME_REPORT_COUNT ? frame_count : TOP_FRAME_REPORT_COUNT;
+  memset(g_frame_ranked, 0, sizeof(g_frame_ranked));
+  bench_log("frame_timing_top_by_max count=%lu\n", (unsigned long)report_count);
+
+  for (u32 rank = 0; rank < report_count; rank++) {
+    u32 best = MAX_BENCH_FRAMES;
+    for (u32 index = 0; index < frame_count; index++) {
+      if (g_frame_ranked[index] || g_frame_sample_count[index] == 0) {
+        continue;
+      }
+      if (best == MAX_BENCH_FRAMES
+          || g_frame_max_ticks[index] > g_frame_max_ticks[best]
+          || (g_frame_max_ticks[index] == g_frame_max_ticks[best]
+              && g_frame_total_ticks[index] > g_frame_total_ticks[best])) {
+        best = index;
+      }
+    }
+    if (best == MAX_BENCH_FRAMES) {
+      break;
+    }
+
+    g_frame_ranked[best] = 1;
+    const u64 sample_count = (u64)g_frame_sample_count[best];
+    const u64 mean_us =
+        ticks_to_us(g_frame_total_ticks[best]) / sample_count;
+    const u64 min_us = ticks_to_us(g_frame_min_ticks[best]);
+    const u64 max_us = ticks_to_us(g_frame_max_ticks[best]);
+    bench_log("frame_timing rank=%lu index=%lu no=%lu type=%u "
+              "samples=%lu min_us=%llu mean_us=%llu max_us=%llu\n",
+        (unsigned long)rank,
+        (unsigned long)best,
+        (unsigned long)g_frame_no[best],
+        (unsigned)g_frame_type[best],
+        (unsigned long)g_frame_sample_count[best],
+        (unsigned long long)min_us,
+        (unsigned long long)mean_us,
+        (unsigned long long)max_us);
+  }
 }
 
 static void checksum_update_byte(u64 *state, u8 byte) {
@@ -138,6 +208,7 @@ int main(int argc, char **argv) {
   u64 worst_ticks = 0;
   u64 output_checksum = 14695981039346656037ULL;
   u32 worst_iter = 0;
+  u32 worst_frame_index = 0;
   u32 worst_frame_no = 0;
   u8 worst_frame_type = 0;
   O3yvFrameInfo info;
@@ -168,7 +239,26 @@ int main(int argc, char **argv) {
         bench_log("too many bench samples: max=%u\n", MAX_BENCH_SAMPLES);
         goto wait_exit;
       }
+      if (iter_frames >= MAX_BENCH_FRAMES) {
+        bench_log("too many frames per iteration: max=%u\n", MAX_BENCH_FRAMES);
+        goto wait_exit;
+      }
+      if (iter > 0
+          && (g_frame_no[iter_frames] != info.frame_no
+              || g_frame_type[iter_frames] != info.frame_type)) {
+        bench_log("frame identity changed: index=%lu expected_no=%lu "
+                  "actual_no=%lu expected_type=%u actual_type=%u\n",
+            (unsigned long)iter_frames,
+            (unsigned long)g_frame_no[iter_frames],
+            (unsigned long)info.frame_no,
+            (unsigned)g_frame_type[iter_frames],
+            (unsigned)info.frame_type);
+        goto wait_exit;
+      }
+
       g_bench_samples[sample_count++] = elapsed;
+      update_frame_timing(
+          iter_frames, info.frame_no, info.frame_type, elapsed);
       checksum_update_frame(
           &output_checksum,
           info.frame_no,
@@ -185,6 +275,7 @@ int main(int argc, char **argv) {
       if (elapsed > worst_ticks) {
         worst_ticks = elapsed;
         worst_iter = (u32)iter;
+        worst_frame_index = iter_frames;
         worst_frame_no = info.frame_no;
         worst_frame_type = info.frame_type;
       }
@@ -237,8 +328,10 @@ int main(int argc, char **argv) {
   print_us_as_ms("worst_frame_ms", worst_us);
   print_us_as_ms("target_worst_ms", O3YV_TARGET_US);
   bench_log("worst_iter: %lu\n", (unsigned long)worst_iter);
+  bench_log("worst_frame_index: %lu\n", (unsigned long)worst_frame_index);
   bench_log("worst_frame_no: %lu\n", (unsigned long)worst_frame_no);
   bench_log("worst_frame_type: %u\n", (unsigned)worst_frame_type);
+  print_top_frame_timings(frames_per_iteration);
   bench_log(
       "output_checksum: %016llx\n", (unsigned long long)output_checksum);
 #ifdef O3YV_EXPECTED_CHECKSUM
@@ -258,7 +351,8 @@ int main(int argc, char **argv) {
   bench_log("bench_result status=%s iterations=%d frames=%lu "
             "frames_per_iteration=%lu min_us=%llu mean_us=%llu "
             "median_us=%llu p95_us=%llu worst_us=%llu target_us=%llu "
-            "worst_iter=%lu worst_frame_no=%lu worst_frame_type=%u "
+            "worst_iter=%lu worst_frame_index=%lu "
+            "worst_frame_no=%lu worst_frame_type=%u "
             "checksum=%016llx "
 #ifdef O3YV_EXPECTED_CHECKSUM
             "expected_checksum=%016llx "
@@ -278,6 +372,7 @@ int main(int argc, char **argv) {
       (unsigned long long)worst_us,
       (unsigned long long)O3YV_TARGET_US,
       (unsigned long)worst_iter,
+      (unsigned long)worst_frame_index,
       (unsigned long)worst_frame_no,
       (unsigned)worst_frame_type,
       (unsigned long long)output_checksum,

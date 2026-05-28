@@ -53,6 +53,7 @@ console and writes the same benchmark output to `sdmc:/o3yvbench.log`:
 - iteration count
 - min, mean, median, and p95 milliseconds per decoded/output frame
 - worst single-frame milliseconds
+- top frames by worst observed decode/output time
 - a `bench_result ...` line for machine checking
 - expected and measured decoded-output checksums
 - error code, if decoding fails

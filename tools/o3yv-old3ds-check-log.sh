@@ -64,6 +64,7 @@ median_us=$(value median_us)
 p95_us=$(value p95_us)
 worst_us=$(value worst_us)
 reported_target_us=$(value target_us)
+worst_frame_index=$(value worst_frame_index)
 worst_frame_no=$(value worst_frame_no)
 checksum=$(value checksum)
 expected_checksum_from_log=$(value expected_checksum)
@@ -94,6 +95,10 @@ for item in iterations frames frames_per_iteration min_us mean_us median_us \
     exit 1
   fi
 done
+if [[ -n "$worst_frame_index" ]] && ! is_uint "$worst_frame_index"; then
+  echo "FAIL non-numeric worst_frame_index=$worst_frame_index" >&2
+  exit 1
+fi
 if [[ -n "$expected_frames_per_iteration" ]] \
   && ! is_uint "$expected_frames_per_iteration"; then
   echo "FAIL non-numeric expected_frames_per_iteration=$expected_frames_per_iteration" >&2
@@ -136,6 +141,11 @@ if (( iterations <= 0 || frames <= 0 || frames_per_iteration <= 0 )); then
 fi
 if (( frames != iterations * frames_per_iteration )); then
   echo "FAIL frames=$frames does not match iterations*frames_per_iteration" >&2
+  exit 1
+fi
+if [[ -n "$worst_frame_index" ]] \
+  && (( worst_frame_index >= frames_per_iteration )); then
+  echo "FAIL worst_frame_index=$worst_frame_index outside frames_per_iteration=$frames_per_iteration" >&2
   exit 1
 fi
 if [[ -n "$expected_frames_per_iteration" ]] \
@@ -187,5 +197,5 @@ if [[ -n "$expected_checksum_from_log" ]] \
   exit 1
 fi
 
-printf 'PASS Old3DS bench: frames=%s min_us=%s mean_us=%s median_us=%s p95_us=%s worst_us=%s worst_frame_no=%s target_us=%s checksum=%s\n' \
-  "$frames" "$min_us" "$mean_us" "$median_us" "$p95_us" "$worst_us" "$worst_frame_no" "$target_us" "$checksum"
+printf 'PASS Old3DS bench: frames=%s min_us=%s mean_us=%s median_us=%s p95_us=%s worst_us=%s worst_frame_index=%s worst_frame_no=%s target_us=%s checksum=%s\n' \
+  "$frames" "$min_us" "$mean_us" "$median_us" "$p95_us" "$worst_us" "${worst_frame_index:-unknown}" "$worst_frame_no" "$target_us" "$checksum"
