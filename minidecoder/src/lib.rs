@@ -903,9 +903,7 @@ fn mode_stream_is_all_skip(mode_stream: &[u8], mb_count: usize) -> bool {
       return false;
     }
   }
-  if r.remaining() == 1 && r.bytes[r.pos] == 0 {
-    r.pos += 1;
-  }
+  r.consume_optional_trailing_zero();
   r.remaining() == 0
 }
 
@@ -1014,9 +1012,7 @@ fn decode_fragment(
       "fragment ended before all MBs were described".into(),
     ));
   }
-  if mr.remaining() == 1 && mr.bytes[mr.pos] == 0 {
-    mr.pos += 1;
-  }
+  mr.consume_optional_trailing_zero();
   if mr.remaining() != 0 || rr.remaining() != 0 || raw.remaining() != 0 {
     return Err(Error::Invalid(
       "fragment streams were not fully consumed".into(),
@@ -1140,9 +1136,7 @@ fn count_base_predictor_mbs_in_modes(
       "fragment ended before all MBs were described".into(),
     ));
   }
-  if r.remaining() == 1 && r.bytes[r.pos] == 0 {
-    r.pos += 1;
-  }
+  r.consume_optional_trailing_zero();
   if r.remaining() != 0 {
     return Err(Error::Invalid("mode stream was not fully consumed".into()));
   }
@@ -1862,7 +1856,7 @@ fn copy_rect(
     } else {
       for row in 0..bh {
         let off = (dst_y + row) * w + dst_x;
-        dst[off..off + bw].copy_from_slice(&src[off..off + bw]);
+        copy_at_len(dst, off, src, off, bw);
       }
     }
     return;
@@ -1894,7 +1888,7 @@ fn copy_rect(
         let dst_off = (dst_y + row) * w + dst_x;
         let src_off = (src_y + row) * w + src_x;
         for col in 0..bw {
-          dst[dst_off + col] = src[src_off + col];
+          store_at(dst, dst_off + col, load_at(src, src_off + col));
         }
       }
     }
@@ -1907,7 +1901,7 @@ fn copy_rect(
       let y = dst_y + row;
       let sx = clamp_i32(x as i32 + mv_x, 0, w as i32 - 1) as usize;
       let sy = clamp_i32(y as i32 + mv_y, 0, h as i32 - 1) as usize;
-      dst[y * w + x] = src[sy * w + sx];
+      store_at(dst, y * w + x, load_at(src, sy * w + sx));
     }
   }
 }
@@ -2044,6 +2038,17 @@ impl<'a> Reader<'a> {
   #[inline(always)]
   fn skip(&mut self, n: usize) -> Result<()> {
     self.take(n).map(|_| ())
+  }
+
+  #[inline(always)]
+  fn consume_optional_trailing_zero(&mut self) {
+    if self.remaining() == 1 {
+      // SAFETY: remaining() == 1 proves pos is in-bounds.
+      let value = unsafe { *self.bytes.as_ptr().add(self.pos) };
+      if value == 0 {
+        self.pos += 1;
+      }
+    }
   }
 
   #[inline(always)]
