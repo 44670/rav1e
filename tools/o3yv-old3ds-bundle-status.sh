@@ -43,6 +43,7 @@ required_vars=(
   iterations
   bench_target_us
   playback_target_us
+  expected_checksum
   o3yvbench_3dsx
   o3yvbench_3dsx_bytes
   o3yvbench_3dsx_sha256
@@ -103,6 +104,8 @@ printf 'bundle_artifact status=%s bundle_dir=%s repo_commit=%s input_stream=%s e
 
 repeat_file="$bundle_dir/azahar-repeat-bench/summary.txt"
 repeat_status=missing
+repeat_checksum=unknown
+repeat_checksum_status=unknown
 if [[ -f "$repeat_file" ]]; then
   repeat_line=$(grep '^azahar_repeat_summary ' "$repeat_file" | tail -1 || true)
   if [[ -n "$repeat_line" ]]; then
@@ -119,7 +122,11 @@ if [[ -f "$repeat_file" ]]; then
     )
     repeat_max_late_frames=$(kv_value "$repeat_line" max_late_frames)
     repeat_checksum_status=$(kv_value "$repeat_line" checksum_status)
-    printf 'azahar_repeat status=%s runs=%s playback_pass=%s bench_output_pass=%s bench_timing_pass=%s direct_timing_pass=%s max_bench_worst_us=%s max_direct_worst_us=%s max_playback_worst_work_us=%s max_late_frames=%s checksum_status=%s summary=%s\n' \
+    repeat_checksum=$(kv_value "$repeat_line" checksum)
+    if [[ "${repeat_checksum,,}" != "${expected_checksum,,}" ]]; then
+      repeat_status=stale
+    fi
+    printf 'azahar_repeat status=%s runs=%s playback_pass=%s bench_output_pass=%s bench_timing_pass=%s direct_timing_pass=%s max_bench_worst_us=%s max_direct_worst_us=%s max_playback_worst_work_us=%s max_late_frames=%s checksum_status=%s checksum=%s expected_checksum=%s summary=%s\n' \
       "$repeat_status" "${repeat_runs:-unknown}" \
       "${repeat_playback_pass:-unknown}" \
       "${repeat_bench_output_pass:-unknown}" \
@@ -129,7 +136,8 @@ if [[ -f "$repeat_file" ]]; then
       "${repeat_max_direct_worst_us:-unknown}" \
       "${repeat_max_playback_worst_work_us:-unknown}" \
       "${repeat_max_late_frames:-unknown}" \
-      "${repeat_checksum_status:-unknown}" "$repeat_file"
+      "${repeat_checksum_status:-unknown}" "${repeat_checksum:-unknown}" \
+      "$expected_checksum" "$repeat_file"
   else
     repeat_status=malformed
     printf 'azahar_repeat status=malformed summary=%s\n' "$repeat_file"
@@ -139,7 +147,9 @@ else
 fi
 
 visual_file="$bundle_dir/azahar-visual-smoke/visual-smoke.txt"
+visual_log="$bundle_dir/azahar-visual-smoke/o3yvbench.log"
 visual_status=missing
+visual_checksum=unknown
 if [[ -f "$visual_file" ]]; then
   visual_line=$(grep '^azahar_visual_smoke ' "$visual_file" | tail -1 || true)
   diff_line=$(grep '^diff ' "$visual_file" | tail -1 || true)
@@ -147,9 +157,21 @@ if [[ -f "$visual_file" ]]; then
     visual_status=$(kv_value "$visual_line" status)
     visual_ae=$(kv_value "$diff_line" ae)
     visual_rmse_normalized=$(kv_value "$diff_line" rmse_normalized)
-    printf 'azahar_visual status=%s ae=%s rmse_normalized=%s report=%s\n' \
+    if [[ -f "$visual_log" ]]; then
+      visual_bench_line=$(
+        grep '^bench_result ' "$visual_log" | tail -1 || true
+      )
+      visual_checksum=$(kv_value "$visual_bench_line" checksum)
+      if [[ "${visual_checksum,,}" != "${expected_checksum,,}" ]]; then
+        visual_status=stale
+      fi
+    else
+      visual_status=stale
+    fi
+    printf 'azahar_visual status=%s ae=%s rmse_normalized=%s checksum=%s expected_checksum=%s report=%s log=%s\n' \
       "$visual_status" "${visual_ae:-unknown}" \
-      "${visual_rmse_normalized:-unknown}" "$visual_file"
+      "${visual_rmse_normalized:-unknown}" "${visual_checksum:-unknown}" \
+      "$expected_checksum" "$visual_file" "$visual_log"
   else
     visual_status=malformed
     printf 'azahar_visual status=malformed report=%s\n' "$visual_file"
