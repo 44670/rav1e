@@ -1381,11 +1381,12 @@ fn copy_raw_4x4_from_reader(
   plane: &mut [u8], stride: usize, x: usize, y: usize,
   residual: &mut Reader<'_>,
 ) -> Result<()> {
-  if residual.bytes.len() - residual.pos < 16 {
+  let start = residual.pos;
+  let end = start + 16;
+  if end > residual.bytes.len() {
     return Err(Error::Eof);
   }
-  let start = residual.pos;
-  residual.pos += 16;
+  residual.pos = end;
 
   // SAFETY: The EOF check above proves all four input words are in-bounds.
   // Block coordinates come from validated fixed O3YV geometry and coded-block
