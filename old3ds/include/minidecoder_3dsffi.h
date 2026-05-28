@@ -24,6 +24,10 @@ int32_t o3yv_decoder_reset(void *decoder);
 int32_t o3yv_decoder_next_frame_yuv420p(
     void *decoder, uint8_t *left_yuv420p, size_t left_len,
     uint8_t *right_yuv420p, size_t right_len, O3yvFrameInfo *info);
+int32_t o3yv_decoder_next_frame(void *decoder, O3yvFrameInfo *info);
+int32_t o3yv_decoder_write_current_yuv420p(
+    void *decoder, uint8_t *left_yuv420p, size_t left_len,
+    uint8_t *right_yuv420p, size_t right_len);
 void o3yv_decoder_drop(void *decoder);
 
 #ifdef __cplusplus

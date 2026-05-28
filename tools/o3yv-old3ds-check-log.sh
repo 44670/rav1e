@@ -59,10 +59,14 @@ iterations=$(value iterations)
 frames=$(value frames)
 frames_per_iteration=$(value frames_per_iteration)
 mean_us=$(value mean_us)
+decode_mean_us=$(value decode_mean_us)
+output_mean_us=$(value output_mean_us)
 min_us=$(value min_us)
 median_us=$(value median_us)
 p95_us=$(value p95_us)
 worst_us=$(value worst_us)
+worst_decode_us=$(value worst_decode_us)
+worst_output_us=$(value worst_output_us)
 reported_target_us=$(value target_us)
 worst_frame_index=$(value worst_frame_index)
 worst_frame_no=$(value worst_frame_no)
@@ -99,6 +103,12 @@ if [[ -n "$worst_frame_index" ]] && ! is_uint "$worst_frame_index"; then
   echo "FAIL non-numeric worst_frame_index=$worst_frame_index" >&2
   exit 1
 fi
+for item in decode_mean_us output_mean_us worst_decode_us worst_output_us; do
+  if [[ -n "${!item}" ]] && ! is_uint "${!item}"; then
+    echo "FAIL non-numeric $item=${!item}" >&2
+    exit 1
+  fi
+done
 if [[ -n "$expected_frames_per_iteration" ]] \
   && ! is_uint "$expected_frames_per_iteration"; then
   echo "FAIL non-numeric expected_frames_per_iteration=$expected_frames_per_iteration" >&2
@@ -186,6 +196,22 @@ if (( mean_us > worst_us )); then
   echo "FAIL mean_us=$mean_us > worst_us=$worst_us" >&2
   exit 1
 fi
+if [[ -n "$decode_mean_us" ]] && (( decode_mean_us > mean_us )); then
+  echo "FAIL decode_mean_us=$decode_mean_us > mean_us=$mean_us" >&2
+  exit 1
+fi
+if [[ -n "$output_mean_us" ]] && (( output_mean_us > mean_us )); then
+  echo "FAIL output_mean_us=$output_mean_us > mean_us=$mean_us" >&2
+  exit 1
+fi
+if [[ -n "$worst_decode_us" ]] && (( worst_decode_us > worst_us )); then
+  echo "FAIL worst_decode_us=$worst_decode_us > worst_us=$worst_us" >&2
+  exit 1
+fi
+if [[ -n "$worst_output_us" ]] && (( worst_output_us > worst_us )); then
+  echo "FAIL worst_output_us=$worst_output_us > worst_us=$worst_us" >&2
+  exit 1
+fi
 if [[ -n "$expected_checksum" ]] \
   && [[ "${checksum,,}" != "${expected_checksum,,}" ]]; then
   echo "FAIL checksum=$checksum expected=$expected_checksum" >&2
@@ -197,5 +223,5 @@ if [[ -n "$expected_checksum_from_log" ]] \
   exit 1
 fi
 
-printf 'PASS Old3DS bench: frames=%s min_us=%s mean_us=%s median_us=%s p95_us=%s worst_us=%s worst_frame_index=%s worst_frame_no=%s target_us=%s checksum=%s\n' \
-  "$frames" "$min_us" "$mean_us" "$median_us" "$p95_us" "$worst_us" "${worst_frame_index:-unknown}" "$worst_frame_no" "$target_us" "$checksum"
+printf 'PASS Old3DS bench: frames=%s min_us=%s mean_us=%s decode_mean_us=%s output_mean_us=%s median_us=%s p95_us=%s worst_us=%s worst_decode_us=%s worst_output_us=%s worst_frame_index=%s worst_frame_no=%s target_us=%s checksum=%s\n' \
+  "$frames" "$min_us" "$mean_us" "${decode_mean_us:-unknown}" "${output_mean_us:-unknown}" "$median_us" "$p95_us" "$worst_us" "${worst_decode_us:-unknown}" "${worst_output_us:-unknown}" "${worst_frame_index:-unknown}" "$worst_frame_no" "$target_us" "$checksum"

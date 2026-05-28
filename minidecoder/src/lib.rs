@@ -443,6 +443,17 @@ impl<'a> StreamDecoder<'a> {
   pub fn next_frame(&mut self) -> Result<Option<DecodedFrameRef<'_>>> {
     decode_next_frame(&mut self.r, &mut self.state)
   }
+
+  pub fn write_current_yuv420p_into(
+    &self, left: &mut [u8], right: &mut [u8],
+  ) -> Result<()> {
+    if !self.state.has_reference {
+      return Err(Error::Invalid("no decoded frame available".into()));
+    }
+    self.state.reference.left.write_yuv420p_into(left)?;
+    self.state.reference.right.write_yuv420p_into(right)?;
+    Ok(())
+  }
 }
 
 fn decode_next_frame<'state>(

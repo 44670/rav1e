@@ -175,6 +175,63 @@ pub unsafe extern "C" fn o3yv_decoder_next_frame_yuv420p(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn o3yv_decoder_next_frame(
+  decoder: *mut c_void,
+  info: *mut O3yvFrameInfo,
+) -> i32 {
+  let Some(decoder) = decoder_mut(decoder) else {
+    return O3YV_ERR_NULL;
+  };
+  if info.is_null() {
+    return O3YV_ERR_NULL;
+  }
+
+  match decoder.next_frame() {
+    Ok(Some(decoded)) => {
+      unsafe {
+        ptr::write(
+          info,
+          O3yvFrameInfo {
+            frame_no: decoded.frame_no,
+            frame_type: decoded.frame_type,
+            reserved: [0; 3],
+          },
+        );
+      }
+      O3YV_FRAME
+    }
+    Ok(None) => O3YV_DONE,
+    Err(err) => map_error(err),
+  }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn o3yv_decoder_write_current_yuv420p(
+  decoder: *mut c_void,
+  left_yuv420p: *mut u8,
+  left_len: usize,
+  right_yuv420p: *mut u8,
+  right_len: usize,
+) -> i32 {
+  let Some(decoder) = decoder_mut(decoder) else {
+    return O3YV_ERR_NULL;
+  };
+  if left_yuv420p.is_null() || right_yuv420p.is_null() {
+    return O3YV_ERR_NULL;
+  }
+  if left_len != EYE_FRAME_BYTES || right_len != EYE_FRAME_BYTES {
+    return O3YV_ERR_STORAGE;
+  }
+
+  let left = unsafe { slice::from_raw_parts_mut(left_yuv420p, left_len) };
+  let right = unsafe { slice::from_raw_parts_mut(right_yuv420p, right_len) };
+  match decoder.write_current_yuv420p_into(left, right) {
+    Ok(()) => O3YV_DONE,
+    Err(err) => map_error(err),
+  }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn o3yv_decoder_drop(decoder: *mut c_void) {
   if decoder.is_null() {
     return;

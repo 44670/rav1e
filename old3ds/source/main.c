@@ -25,6 +25,10 @@ static u64 g_bench_samples[MAX_BENCH_SAMPLES];
 static u64 g_frame_total_ticks[MAX_BENCH_FRAMES];
 static u64 g_frame_min_ticks[MAX_BENCH_FRAMES];
 static u64 g_frame_max_ticks[MAX_BENCH_FRAMES];
+static u64 g_frame_decode_total_ticks[MAX_BENCH_FRAMES];
+static u64 g_frame_decode_max_ticks[MAX_BENCH_FRAMES];
+static u64 g_frame_output_total_ticks[MAX_BENCH_FRAMES];
+static u64 g_frame_output_max_ticks[MAX_BENCH_FRAMES];
 static u32 g_frame_sample_count[MAX_BENCH_FRAMES];
 static u32 g_frame_no[MAX_BENCH_FRAMES];
 static u8 g_frame_type[MAX_BENCH_FRAMES];
@@ -73,21 +77,32 @@ static u64 percentile_ticks(const u64 *samples, u32 sample_count, u32 pct) {
 }
 
 static void update_frame_timing(
-    u32 index, u32 frame_no, u8 frame_type, u64 elapsed) {
+    u32 index, u32 frame_no, u8 frame_type, u64 total_elapsed,
+    u64 decode_elapsed, u64 output_elapsed) {
   if (g_frame_sample_count[index] == 0) {
     g_frame_no[index] = frame_no;
     g_frame_type[index] = frame_type;
-    g_frame_min_ticks[index] = elapsed;
-    g_frame_max_ticks[index] = elapsed;
+    g_frame_min_ticks[index] = total_elapsed;
+    g_frame_max_ticks[index] = total_elapsed;
+    g_frame_decode_max_ticks[index] = decode_elapsed;
+    g_frame_output_max_ticks[index] = output_elapsed;
   } else {
-    if (elapsed < g_frame_min_ticks[index]) {
-      g_frame_min_ticks[index] = elapsed;
+    if (total_elapsed < g_frame_min_ticks[index]) {
+      g_frame_min_ticks[index] = total_elapsed;
     }
-    if (elapsed > g_frame_max_ticks[index]) {
-      g_frame_max_ticks[index] = elapsed;
+    if (total_elapsed > g_frame_max_ticks[index]) {
+      g_frame_max_ticks[index] = total_elapsed;
+    }
+    if (decode_elapsed > g_frame_decode_max_ticks[index]) {
+      g_frame_decode_max_ticks[index] = decode_elapsed;
+    }
+    if (output_elapsed > g_frame_output_max_ticks[index]) {
+      g_frame_output_max_ticks[index] = output_elapsed;
     }
   }
-  g_frame_total_ticks[index] += elapsed;
+  g_frame_total_ticks[index] += total_elapsed;
+  g_frame_decode_total_ticks[index] += decode_elapsed;
+  g_frame_output_total_ticks[index] += output_elapsed;
   g_frame_sample_count[index]++;
 }
 
@@ -120,8 +135,16 @@ static void print_top_frame_timings(u32 frame_count) {
         ticks_to_us(g_frame_total_ticks[best]) / sample_count;
     const u64 min_us = ticks_to_us(g_frame_min_ticks[best]);
     const u64 max_us = ticks_to_us(g_frame_max_ticks[best]);
+    const u64 decode_mean_us =
+        ticks_to_us(g_frame_decode_total_ticks[best]) / sample_count;
+    const u64 decode_max_us = ticks_to_us(g_frame_decode_max_ticks[best]);
+    const u64 output_mean_us =
+        ticks_to_us(g_frame_output_total_ticks[best]) / sample_count;
+    const u64 output_max_us = ticks_to_us(g_frame_output_max_ticks[best]);
     bench_log("frame_timing rank=%lu index=%lu no=%lu type=%u "
-              "samples=%lu min_us=%llu mean_us=%llu max_us=%llu\n",
+              "samples=%lu min_us=%llu mean_us=%llu max_us=%llu "
+              "decode_mean_us=%llu decode_max_us=%llu "
+              "output_mean_us=%llu output_max_us=%llu\n",
         (unsigned long)rank,
         (unsigned long)best,
         (unsigned long)g_frame_no[best],
@@ -129,7 +152,11 @@ static void print_top_frame_timings(u32 frame_count) {
         (unsigned long)g_frame_sample_count[best],
         (unsigned long long)min_us,
         (unsigned long long)mean_us,
-        (unsigned long long)max_us);
+        (unsigned long long)max_us,
+        (unsigned long long)decode_mean_us,
+        (unsigned long long)decode_max_us,
+        (unsigned long long)output_mean_us,
+        (unsigned long long)output_max_us);
   }
 }
 
@@ -204,8 +231,12 @@ int main(int argc, char **argv) {
   u32 frames_per_iteration = 0;
   u32 sample_count = 0;
   u64 total_ticks = 0;
+  u64 total_decode_ticks = 0;
+  u64 total_output_ticks = 0;
   u64 min_ticks = ~0ULL;
   u64 worst_ticks = 0;
+  u64 worst_decode_ticks = 0;
+  u64 worst_output_ticks = 0;
   u64 output_checksum = 14695981039346656037ULL;
   u32 worst_iter = 0;
   u32 worst_frame_index = 0;
@@ -223,9 +254,8 @@ int main(int argc, char **argv) {
     u32 iter_frames = 0;
     for (;;) {
       const u64 start = svcGetSystemTick();
-      rc = o3yv_decoder_next_frame_yuv420p(
-          decoder, left, eye_bytes, right, eye_bytes, &info);
-      const u64 elapsed = svcGetSystemTick() - start;
+      rc = o3yv_decoder_next_frame(decoder, &info);
+      const u64 after_decode = svcGetSystemTick();
 
       if (rc == 0) {
         break;
@@ -235,6 +265,17 @@ int main(int argc, char **argv) {
         goto wait_exit;
       }
 
+      rc = o3yv_decoder_write_current_yuv420p(
+          decoder, left, eye_bytes, right, eye_bytes);
+      const u64 after_output = svcGetSystemTick();
+      if (rc != 0) {
+        bench_log("output failed: %ld\n", (long)rc);
+        goto wait_exit;
+      }
+
+      const u64 decode_elapsed = after_decode - start;
+      const u64 output_elapsed = after_output - after_decode;
+      const u64 elapsed = after_output - start;
       if (sample_count >= MAX_BENCH_SAMPLES) {
         bench_log("too many bench samples: max=%u\n", MAX_BENCH_SAMPLES);
         goto wait_exit;
@@ -256,9 +297,15 @@ int main(int argc, char **argv) {
         goto wait_exit;
       }
 
+      const u32 frame_index = iter_frames;
       g_bench_samples[sample_count++] = elapsed;
       update_frame_timing(
-          iter_frames, info.frame_no, info.frame_type, elapsed);
+          frame_index,
+          info.frame_no,
+          info.frame_type,
+          elapsed,
+          decode_elapsed,
+          output_elapsed);
       checksum_update_frame(
           &output_checksum,
           info.frame_no,
@@ -267,18 +314,26 @@ int main(int argc, char **argv) {
           right,
           eye_bytes);
       total_frames++;
-      iter_frames++;
       total_ticks += elapsed;
+      total_decode_ticks += decode_elapsed;
+      total_output_ticks += output_elapsed;
       if (elapsed < min_ticks) {
         min_ticks = elapsed;
+      }
+      if (decode_elapsed > worst_decode_ticks) {
+        worst_decode_ticks = decode_elapsed;
+      }
+      if (output_elapsed > worst_output_ticks) {
+        worst_output_ticks = output_elapsed;
       }
       if (elapsed > worst_ticks) {
         worst_ticks = elapsed;
         worst_iter = (u32)iter;
-        worst_frame_index = iter_frames;
+        worst_frame_index = frame_index;
         worst_frame_no = info.frame_no;
         worst_frame_type = info.frame_type;
       }
+      iter_frames++;
     }
 
     if (iter == 0) {
@@ -300,12 +355,18 @@ int main(int argc, char **argv) {
   qsort(g_bench_samples, sample_count, sizeof(g_bench_samples[0]), compare_u64);
 
   const u64 mean_us = ticks_to_us(total_ticks) / (u64)total_frames;
+  const u64 decode_mean_us =
+      ticks_to_us(total_decode_ticks) / (u64)total_frames;
+  const u64 output_mean_us =
+      ticks_to_us(total_output_ticks) / (u64)total_frames;
   const u64 min_us = ticks_to_us(min_ticks);
   const u64 median_us =
       ticks_to_us(percentile_ticks(g_bench_samples, sample_count, 50));
   const u64 p95_us =
       ticks_to_us(percentile_ticks(g_bench_samples, sample_count, 95));
   const u64 worst_us = ticks_to_us(worst_ticks);
+  const u64 worst_decode_us = ticks_to_us(worst_decode_ticks);
+  const u64 worst_output_us = ticks_to_us(worst_output_ticks);
   int output_ok = 1;
 #ifdef O3YV_EXPECTED_FRAMES_PER_ITERATION
   output_ok = output_ok
@@ -323,9 +384,13 @@ int main(int argc, char **argv) {
       "frames_per_iteration: %lu\n", (unsigned long)frames_per_iteration);
   print_us_as_ms("min_ms_per_frame", min_us);
   print_us_as_ms("mean_ms_per_frame", mean_us);
+  print_us_as_ms("mean_decode_ms_per_frame", decode_mean_us);
+  print_us_as_ms("mean_output_ms_per_frame", output_mean_us);
   print_us_as_ms("median_ms_per_frame", median_us);
   print_us_as_ms("p95_ms_per_frame", p95_us);
   print_us_as_ms("worst_frame_ms", worst_us);
+  print_us_as_ms("worst_decode_ms", worst_decode_us);
+  print_us_as_ms("worst_output_ms", worst_output_us);
   print_us_as_ms("target_worst_ms", O3YV_TARGET_US);
   bench_log("worst_iter: %lu\n", (unsigned long)worst_iter);
   bench_log("worst_frame_index: %lu\n", (unsigned long)worst_frame_index);
@@ -350,7 +415,9 @@ int main(int argc, char **argv) {
   bench_log("output_status: %s\n", output_ok ? "pass" : "fail");
   bench_log("bench_result status=%s iterations=%d frames=%lu "
             "frames_per_iteration=%lu min_us=%llu mean_us=%llu "
-            "median_us=%llu p95_us=%llu worst_us=%llu target_us=%llu "
+            "decode_mean_us=%llu output_mean_us=%llu "
+            "median_us=%llu p95_us=%llu worst_us=%llu "
+            "worst_decode_us=%llu worst_output_us=%llu target_us=%llu "
             "worst_iter=%lu worst_frame_index=%lu "
             "worst_frame_no=%lu worst_frame_type=%u "
             "checksum=%016llx "
@@ -367,9 +434,13 @@ int main(int argc, char **argv) {
       (unsigned long)frames_per_iteration,
       (unsigned long long)min_us,
       (unsigned long long)mean_us,
+      (unsigned long long)decode_mean_us,
+      (unsigned long long)output_mean_us,
       (unsigned long long)median_us,
       (unsigned long long)p95_us,
       (unsigned long long)worst_us,
+      (unsigned long long)worst_decode_us,
+      (unsigned long long)worst_output_us,
       (unsigned long long)O3YV_TARGET_US,
       (unsigned long)worst_iter,
       (unsigned long)worst_frame_index,
