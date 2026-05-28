@@ -503,6 +503,9 @@ fn decode_next_frame<'state>(
   if payload_end > r.bytes.len() {
     return Err(Error::Eof);
   }
+  // SAFETY: checked_add plus payload_end <= bytes.len() proves the whole
+  // frame payload range is in-bounds.
+  let payload = unsafe { slice_at(r.bytes, payload_start, frame_size) };
 
   match frame_type {
     FRAME_TYPE_KEY_RAW => {
@@ -535,10 +538,7 @@ fn decode_next_frame<'state>(
         ));
       }
       if frame_size <= REFERENCE_REUSE_FRAME_PAYLOAD_MAX
-        && p_payload_reuses_reference(
-          &r.bytes[payload_start..payload_end],
-          tile_count,
-        )
+        && p_payload_reuses_reference(payload, tile_count)
       {
         r.pos = payload_end;
         return Ok(Some(DecodedFrameRef {
@@ -549,7 +549,7 @@ fn decode_next_frame<'state>(
       }
       {
         let reference = &state.reference;
-        let mut pr = Reader::new(&r.bytes[payload_start..payload_end]);
+        let mut pr = Reader::new(payload);
         for _ in 0..2 {
           decode_tile(&mut pr, reference, &mut state.current)?;
         }
@@ -1935,6 +1935,13 @@ fn copy_at_len(
       len,
     );
   }
+}
+
+#[inline(always)]
+unsafe fn slice_at(bytes: &[u8], offset: usize, len: usize) -> &[u8] {
+  debug_assert!(offset + len <= bytes.len());
+  // SAFETY: Callers prove offset..offset+len is inside bytes.
+  unsafe { slice::from_raw_parts(bytes.as_ptr().add(offset), len) }
 }
 
 #[inline(always)]
