@@ -727,18 +727,26 @@ fn decode_tile(
   if r.remaining() < TILE_HEADER_SIZE {
     return Err(Error::Eof);
   }
-  let tile_id = r.u8()?;
-  let mb_x = r.u8()?;
-  let mb_y = r.u8()?;
-  let mb_w = r.u8()?;
-  let mb_h = r.u8()?;
-  let base_mv = Mv { x: r.i8()?, y: r.i8()? };
-  let q_y = r.u8()?;
-  let q_uv = r.u8()?;
-  let segment_count = r.u8()?;
-  let fragment_count = r.u8()?;
-  let tile_flags = r.u16()?;
-  let payload_size = r.u32()? as usize;
+  let header_start = r.pos;
+  r.pos += TILE_HEADER_SIZE;
+  // SAFETY: remaining() >= TILE_HEADER_SIZE proves the fixed tile header is
+  // in-bounds. Variable-length payload bounds are still checked below.
+  let header = unsafe { r.bytes.as_ptr().add(header_start) };
+  let tile_id = unsafe { *header };
+  let mb_x = unsafe { *header.add(1) };
+  let mb_y = unsafe { *header.add(2) };
+  let mb_w = unsafe { *header.add(3) };
+  let mb_h = unsafe { *header.add(4) };
+  let base_mv = Mv {
+    x: unsafe { *header.add(5) } as i8,
+    y: unsafe { *header.add(6) } as i8,
+  };
+  let q_y = unsafe { *header.add(7) };
+  let q_uv = unsafe { *header.add(8) };
+  let segment_count = unsafe { *header.add(9) };
+  let fragment_count = unsafe { *header.add(10) };
+  let tile_flags = unsafe { load_u16_le(header.add(11)) };
+  let payload_size = unsafe { load_u32_le(header.add(13)) } as usize;
 
   if tile_id > 1
     || mb_x != 0
@@ -941,17 +949,22 @@ fn decode_fragment(
   if r.remaining() < FRAGMENT_HEADER_SIZE {
     return Err(Error::Eof);
   }
-  let frag_tile_id = r.u8()?;
-  let row_start = r.u8()?;
-  let row_count = r.u8()?;
-  let flags = r.u8()?;
-  let start_mb = r.u16()? as usize;
-  let mb_count = r.u16()? as usize;
-  let segment_map_size = r.u32()? as usize;
-  let mode_size = r.u32()? as usize;
-  let residual_size = r.u32()? as usize;
-  let raw_size = r.u32()? as usize;
-  let crc = r.u32()?;
+  let header_start = r.pos;
+  r.pos += FRAGMENT_HEADER_SIZE;
+  // SAFETY: remaining() >= FRAGMENT_HEADER_SIZE proves the fixed fragment
+  // header is in-bounds. Variable stream sizes are still checked by take().
+  let header = unsafe { r.bytes.as_ptr().add(header_start) };
+  let frag_tile_id = unsafe { *header };
+  let row_start = unsafe { *header.add(1) };
+  let row_count = unsafe { *header.add(2) };
+  let flags = unsafe { *header.add(3) };
+  let start_mb = unsafe { load_u16_le(header.add(4)) } as usize;
+  let mb_count = unsafe { load_u16_le(header.add(6)) } as usize;
+  let segment_map_size = unsafe { load_u32_le(header.add(8)) } as usize;
+  let mode_size = unsafe { load_u32_le(header.add(12)) } as usize;
+  let residual_size = unsafe { load_u32_le(header.add(16)) } as usize;
+  let raw_size = unsafe { load_u32_le(header.add(20)) } as usize;
+  let crc = unsafe { load_u32_le(header.add(24)) };
 
   validate_fragment_header(
     frag_tile_id,
@@ -2207,6 +2220,18 @@ pub fn put_u32(out: &mut Vec<u8>, v: u32) {
 
 fn put_u64(out: &mut Vec<u8>, v: u64) {
   out.extend_from_slice(&v.to_le_bytes());
+}
+
+#[inline(always)]
+unsafe fn load_u16_le(ptr: *const u8) -> u16 {
+  u16::from_le_bytes([unsafe { *ptr }, unsafe { *ptr.add(1) }])
+}
+
+#[inline(always)]
+unsafe fn load_u32_le(ptr: *const u8) -> u32 {
+  u32::from_le_bytes(unsafe {
+    [*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)]
+  })
 }
 
 #[derive(Clone)]
