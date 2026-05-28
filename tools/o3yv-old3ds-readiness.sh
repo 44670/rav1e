@@ -173,6 +173,7 @@ check_file "representative stream" "$input"
 check_file "Old3DS harness C source" "old3ds/source/main.c"
 check_file "Old3DS Rust FFI crate" "old3ds/minidecoder-3dsffi/Cargo.toml"
 check_file "Old3DS build script" "tools/o3yv-old3ds-build-harness.sh"
+check_file "Old3DS devkitPro image fetcher" "tools/o3yv-old3ds-fetch-devkitpro-image.sh"
 check_file "Old3DS bench log checker" "tools/o3yv-old3ds-check-log.sh"
 check_file "Old3DS expected checksum tool" "tools/o3yv-old3ds-expected-checksum.sh"
 check_file "Old3DS bench log verifier" "tools/o3yv-old3ds-verify-log.sh"
@@ -193,7 +194,6 @@ if (( have_nightly != 0 && have_rust_src != 0 )); then
   check_old3ds_rust_staticlib
 fi
 check_command arm-none-eabi-gcc
-check_command makerom
 check_command 3dsxtool
 check_command make
 
@@ -219,7 +219,7 @@ if (( missing != 0 )); then
   cat >&2 <<'EOF'
 
 Old3DS hardware timing is not ready on this machine. Install devkitPro with
-devkitARM, libctru, makerom, 3dsxtool, Rust nightly, and nightly rust-src.
+devkitARM, libctru, 3dsxtool, Rust nightly, and nightly rust-src.
 Then run:
 
   tools/o3yv-old3ds-build-harness.sh

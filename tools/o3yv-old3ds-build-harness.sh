@@ -6,7 +6,7 @@ usage() {
 usage: tools/o3yv-old3ds-build-harness.sh [representative.o3yv]
 
 Builds the Old3DS hardware timing harness. This requires devkitPro/devkitARM,
-makerom, 3dsxtool, Rust nightly, and the rust-src component.
+3dsxtool, Rust nightly, and the rust-src component.
 
 Defaults:
   representative.o3yv   tmp/reencode_lazy128_current.o3yv
@@ -43,7 +43,6 @@ fi
 require_command cargo
 require_command rustup
 require_command arm-none-eabi-gcc
-require_command makerom
 require_command 3dsxtool
 require_command make
 

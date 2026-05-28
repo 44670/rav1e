@@ -43,7 +43,7 @@ export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 export OFILES := $(OFILES)
 
-.PHONY: all clean
+.PHONY: all clean $(BUILD)
 
 all: $(BUILD)
 

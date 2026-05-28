@@ -12,7 +12,7 @@ goal is only proven by running this harness on an actual Old3DS.
 ## Prerequisites
 
 - devkitPro with devkitARM and libctru
-- `makerom` and `3dsxtool` in `PATH`
+- `3dsxtool` in `PATH`
 - Rust nightly with `rust-src`
 - A representative stream, normally `tmp/reencode_lazy128_current.o3yv`
 
@@ -21,6 +21,15 @@ Install the Rust pieces with:
 ```sh
 rustup toolchain install nightly
 rustup component add rust-src --toolchain nightly
+```
+
+If devkitPro is not installed system-wide, the local no-sudo fallback is:
+
+```sh
+tools/o3yv-old3ds-fetch-devkitpro-image.sh
+export DEVKITPRO="/tmp/o3yv-devkitpro-root/opt/devkitpro"
+export DEVKITARM="$DEVKITPRO/devkitARM"
+export PATH="$DEVKITPRO/tools/bin:$DEVKITARM/bin:$PATH"
 ```
 
 ## Build
