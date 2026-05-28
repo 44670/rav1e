@@ -510,14 +510,16 @@ fn decode_next_frame<'state>(
           "KEY_RAW payload must be {SBS_FRAME_BYTES} bytes, got {frame_size}"
         )));
       }
-      read_eye_raw_into(
+      read_eye_raw_from_stream(
         &mut state.current.left,
-        &r.bytes[payload_start..payload_start + EYE_FRAME_BYTES],
-      )?;
-      read_eye_raw_into(
+        r.bytes,
+        payload_start,
+      );
+      read_eye_raw_from_stream(
         &mut state.current.right,
-        &r.bytes[payload_start + EYE_FRAME_BYTES..payload_end],
-      )?;
+        r.bytes,
+        payload_start + EYE_FRAME_BYTES,
+      );
     }
     FRAME_TYPE_P => {
       if tile_count != 2 {
@@ -2118,19 +2120,16 @@ fn write_eye_raw(out: &mut Vec<u8>, eye: &EyeFrame) {
   out.extend_from_slice(&eye.cr);
 }
 
-fn read_eye_raw_into(dst: &mut EyeFrame, bytes: &[u8]) -> Result<()> {
-  if bytes.len() != EYE_FRAME_BYTES {
-    return Err(Error::Invalid("bad eye raw size".into()));
-  }
-  copy_at::<EYE_Y_BYTES>(&mut dst.y, 0, bytes, 0);
-  copy_at::<EYE_CHROMA_BYTES>(&mut dst.cb, 0, bytes, EYE_Y_BYTES);
+fn read_eye_raw_from_stream(dst: &mut EyeFrame, bytes: &[u8], offset: usize) {
+  debug_assert!(offset + EYE_FRAME_BYTES <= bytes.len());
+  copy_at::<EYE_Y_BYTES>(&mut dst.y, 0, bytes, offset);
+  copy_at::<EYE_CHROMA_BYTES>(&mut dst.cb, 0, bytes, offset + EYE_Y_BYTES);
   copy_at::<EYE_CHROMA_BYTES>(
     &mut dst.cr,
     0,
     bytes,
-    EYE_Y_BYTES + EYE_CHROMA_BYTES,
+    offset + EYE_Y_BYTES + EYE_CHROMA_BYTES,
   );
-  Ok(())
 }
 
 fn clip_u8(v: i32) -> u8 {
