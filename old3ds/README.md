@@ -54,8 +54,12 @@ the hardware log back into the bundle:
 ```sh
 tools/o3yv-old3ds-sd-handoff.sh detect
 tools/o3yv-old3ds-sd-handoff.sh install tmp/o3yv-old3ds-playable /media/$USER/OLD3DS
+tools/o3yv-old3ds-sd-handoff.sh export-zip tmp/o3yv-old3ds-playable tmp/o3yv-old3ds-playable-sd.zip
 tools/o3yv-old3ds-sd-handoff.sh import-log tmp/o3yv-old3ds-playable /media/$USER/OLD3DS
 ```
+
+Use `export-zip` when the SD card is not mounted on the build host; extract the
+zip at the root of the Old3DS SD card.
 
 ## Build
 

@@ -113,6 +113,9 @@ printf -v sd_detect_command \
 printf -v sd_install_command \
   'tools/o3yv-old3ds-sd-handoff.sh install %q /path/to/3ds-sd-root' \
   "$out_dir"
+printf -v sd_export_zip_command \
+  'tools/o3yv-old3ds-sd-handoff.sh export-zip %q %q' \
+  "$out_dir" "$out_dir-sd.zip"
 printf -v sd_import_log_command \
   'tools/o3yv-old3ds-sd-handoff.sh import-log %q /path/to/3ds-sd-root' \
   "$out_dir"
@@ -150,6 +153,7 @@ manifest_kv() {
   manifest_kv bundle_status_command "$bundle_status_command"
   manifest_kv sd_detect_command "$sd_detect_command"
   manifest_kv sd_install_command "$sd_install_command"
+  manifest_kv sd_export_zip_command "$sd_export_zip_command"
   manifest_kv sd_import_log_command "$sd_import_log_command"
 } >"$out_dir/MANIFEST.env"
 
@@ -162,6 +166,11 @@ To copy the app to a physical Old3DS SD-card root from the host:
 
   $sd_detect_command
   $sd_install_command
+
+If the SD card is not mounted on this machine, create an SD-root zip instead
+and extract it at the root of the Old3DS SD card on another machine:
+
+  $sd_export_zip_command
 
 The machine-readable log is written to:
 
