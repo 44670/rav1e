@@ -66,6 +66,7 @@ typedef struct {
 #define SYSCLOCK_ARM11 268123480u
 #define INPUT_YUV420_INDIV_8 1
 #define OUTPUT_RGB_24 1
+#define ROTATION_NONE 0
 #define ROTATION_CLOCKWISE_90 1
 #define BLOCK_LINE 0
 #define COEFFICIENT_ITU_R_BT_709_SCALING 3
@@ -142,6 +143,11 @@ static inline Result Y2RU_IsBusyConversion(bool *busy) {
   return 0;
 }
 static inline Result GSPGPU_FlushDataCache(void *address, u32 size) {
+  (void)address;
+  (void)size;
+  return 0;
+}
+static inline Result GSPGPU_InvalidateDataCache(void *address, u32 size) {
   (void)address;
   (void)size;
   return 0;
