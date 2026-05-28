@@ -157,7 +157,8 @@ for run in $(seq 1 "$runs"); do
 done
 
 status=fail
-if (( playback_pass == runs && bench_output_pass == runs )) \
+if (( playback_pass == runs && bench_output_pass == runs \
+    && direct_timing_pass == runs )) \
   && [[ "$checksum_status" == "pass" ]]; then
   if (( bench_timing_pass == runs && direct_timing_pass == runs )); then
     status=strict_pass

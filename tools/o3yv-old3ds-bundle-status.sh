@@ -10,8 +10,9 @@ It checks the packaged .3dsx hash/size, summarizes optional Azahar repeat and
 visual-smoke evidence, and uses a copied real Old3DS log when present.
 
 Status meanings:
-  pass_hardware  Real Old3DS log proves deterministic output and 24 fps playback.
-  plausible      Packaged artifact is intact and Azahar repeat+visual evidence pass.
+  pass_hardware  Real Old3DS log proves deterministic output, direct-plane timing,
+                 and 24 fps playback.
+  plausible      Artifact is intact and Azahar direct-plane repeat+visual evidence pass.
   needs_evidence More timing/visual evidence is required.
   fail           Bundle artifact or provided evidence failed validation.
 

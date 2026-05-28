@@ -10,7 +10,7 @@ the strict decoder verifier; it reports both:
 
   - deterministic decoded output and strict decoder benchmark status
   - optional direct-plane decoder benchmark status
-  - rendered 24 fps playback status
+  - direct-plane decoder benchmark and rendered 24 fps playback status
 
 Defaults:
   input.o3yv          tmp/reencode_lazy128_current.o3yv
@@ -280,7 +280,14 @@ if [[ "$playback_status" == "pass" ]] \
   playback_ok=pass
 fi
 
-if [[ "$bench_output_ok" == "pass" && "$playback_ok" == "pass" ]]; then
+direct_playback_ok=fail
+if [[ "$bench_output_ok" == "pass" ]] \
+  && [[ "$direct_bench_ok" == "pass" ]] \
+  && [[ "$playback_ok" == "pass" ]]; then
+  direct_playback_ok=pass
+fi
+
+if [[ "$direct_playback_ok" == "pass" ]]; then
   case "$evidence_label" in
     real_old3ds | old3ds_hardware | hardware | real_hardware)
       playability_status=pass_hardware
@@ -320,10 +327,19 @@ printf 'playback status=%s renderer=%s output_mode=%s frames=%s fps=%s mean_work
   "${playback_worst_decode_us:-unknown}" \
   "${playback_worst_output_us:-unknown}" \
   "${playback_worst_render_us:-unknown}"
+printf 'direct_playback status=%s deterministic_output=%s direct_bench=%s playback=%s\n' \
+  "$direct_playback_ok" "$bench_output_ok" "$direct_bench_ok" \
+  "$playback_ok"
 printf 'playability_status=%s\n' "$playability_status"
 
 if [[ "$bench_timing_ok" != "pass" ]]; then
   printf 'note=strict_decoder_budget_not_met\n'
+fi
+if [[ "$direct_bench_ok" != "pass" ]]; then
+  printf 'note=direct_plane_budget_not_met\n'
+fi
+if [[ "$playback_ok" != "pass" ]]; then
+  printf 'note=playback_budget_not_met\n'
 fi
 if [[ "$playability_status" == "plausible" ]]; then
   printf 'note=emulator_or_unknown_evidence_needs_real_old3ds_log_for_final_proof\n'
