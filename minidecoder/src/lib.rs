@@ -1296,6 +1296,9 @@ fn apply_mb_residual(
   if (mask & 0xff00_0000) != 0 {
     return Err(Error::Invalid("coded block mask uses reserved bits".into()));
   }
+  if mask == 0 {
+    return Ok(());
+  }
 
   let mb_x = mb_index % MB_W;
   let mb_y = mb_index / MB_W;
