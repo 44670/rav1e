@@ -465,6 +465,55 @@ impl<'a> StreamDecoder<'a> {
   }
 }
 
+pub struct FrameDecoder {
+  state: DecoderState,
+}
+
+impl FrameDecoder {
+  pub fn new() -> Self {
+    Self { state: DecoderState::new() }
+  }
+
+  pub fn reset(&mut self) {
+    self.state.reset();
+  }
+
+  pub fn decode_frame(
+    &mut self, bytes: &[u8],
+  ) -> Result<Option<DecodedFrameRef<'_>>> {
+    let mut r = Reader::new(bytes);
+    let decoded = decode_next_frame(&mut r, &mut self.state)?;
+    if r.remaining() != 0 {
+      return Err(Error::Invalid("unconsumed frame bytes".into()));
+    }
+    Ok(decoded)
+  }
+
+  pub fn write_current_yuv420p_into(
+    &self, left: &mut [u8], right: &mut [u8],
+  ) -> Result<()> {
+    if !self.state.has_reference {
+      return Err(Error::Invalid("no decoded frame available".into()));
+    }
+    write_decoder_eye_yuv420p_into(&self.state.reference.left, left)?;
+    write_decoder_eye_yuv420p_into(&self.state.reference.right, right)?;
+    Ok(())
+  }
+
+  pub fn current_frame(&self) -> Result<&SbsFrame> {
+    if !self.state.has_reference {
+      return Err(Error::Invalid("no decoded frame available".into()));
+    }
+    Ok(&self.state.reference)
+  }
+}
+
+impl Default for FrameDecoder {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 fn decode_next_frame<'state>(
   r: &mut Reader<'_>, state: &'state mut DecoderState,
 ) -> Result<Option<DecodedFrameRef<'state>>> {
@@ -2693,6 +2742,44 @@ mod tests {
     let first_again = decoder.next_frame().unwrap().unwrap();
     assert_eq!(first_again.frame_no, 0);
     assert_eq!(first_again.frame_type, FRAME_TYPE_KEY_RAW);
+  }
+
+  #[test]
+  fn frame_decoder_decodes_individual_frame_buffers() {
+    let bytes = p_with_tiles(vec![0x7f, 0x7f, 0x79, 0], vec![], vec![]);
+    let first_start = FILE_HEADER_SIZE as usize;
+    let first_size =
+      u32::from_le_bytes(bytes[first_start + 4..first_start + 8].try_into().unwrap())
+        as usize;
+    let first_end = first_start + FRAME_HEADER_SIZE + first_size;
+    let second_size =
+      u32::from_le_bytes(bytes[first_end + 4..first_end + 8].try_into().unwrap())
+        as usize;
+    let second_end = first_end + FRAME_HEADER_SIZE + second_size;
+
+    let mut decoder = FrameDecoder::new();
+    let first = decoder
+      .decode_frame(&bytes[first_start..first_end])
+      .unwrap()
+      .unwrap();
+    assert_eq!(first.frame_no, 0);
+    assert_eq!(first.frame_type, FRAME_TYPE_KEY_RAW);
+    let key = first.frame.clone();
+
+    let second = decoder
+      .decode_frame(&bytes[first_end..second_end])
+      .unwrap()
+      .unwrap();
+    assert_eq!(second.frame_no, 1);
+    assert_eq!(second.frame_type, FRAME_TYPE_P);
+    assert_eq!(*second.frame, key);
+
+    decoder.reset();
+    let first_again = decoder
+      .decode_frame(&bytes[first_start..first_end])
+      .unwrap()
+      .unwrap();
+    assert_eq!(first_again.frame_no, 0);
   }
 
   #[test]
