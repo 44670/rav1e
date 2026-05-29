@@ -1039,7 +1039,7 @@ fn decode_fragment(
         mb_index += 1;
       }
     } else {
-      return Err(Error::Invalid(format!("reserved mode opcode 0x{op:02x}")));
+      return Err(Error::Invalid("reserved mode opcode".into()));
     }
   }
 
@@ -1171,7 +1171,7 @@ fn count_base_predictor_mbs_in_modes(
       }
       mb_index += run;
     } else {
-      return Err(Error::Invalid(format!("reserved mode opcode 0x{op:02x}")));
+      return Err(Error::Invalid("reserved mode opcode".into()));
     }
   }
   if mb_index != end_mb {
@@ -1195,7 +1195,7 @@ fn skip_mode_payload(mode: u8, r: &mut Reader<'_>) -> Result<()> {
       r.skip(4)
     }
     MODE_COPY8X8 | MODE_COPY8X8_RES => r.skip(8),
-    _ => Err(Error::Unsupported(format!("MB mode {mode}"))),
+    _ => Err(Error::Unsupported("unsupported MB mode".into())),
   }
 }
 
@@ -1303,7 +1303,7 @@ fn decode_one_mb(
       write_raw_mb(current, mb_index, bytes);
       Ok(())
     }
-    _ => Err(Error::Unsupported(format!("MB mode {mode}"))),
+    _ => Err(Error::Unsupported("unsupported MB mode".into())),
   }
 }
 
